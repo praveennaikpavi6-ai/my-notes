@@ -21,6 +21,11 @@ const { useState, useRef, useEffect, useCallback } = React;
 // Outside Claude    → Google Apps Script → Firestore: knowledgeOS/state in Firebase
 // Fallback          → localStorage (if Drive fails outside Claude)
 
+const IS_CLAUDE = (() => {
+  try { return typeof window.storage !== "undefined" && typeof window.storage.get === "function"; }
+  catch { return false; }
+})();
+
 const firebaseConfig = {
   apiKey: "AIzaSyCMS5Lsq3evfeel6hSXXqPFDQzl2RTvTJM",
   authDomain: "knowledge-os-web1.firebaseapp.com",
