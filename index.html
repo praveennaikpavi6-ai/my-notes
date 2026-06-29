@@ -39,11 +39,23 @@ const firestoreStore = (() => {
   try {
     const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore(app);
+    db.settings({ ignoreUndefinedProperties: true });
     const stateRef = db.collection("knowledgeOS").doc("state");
     const withTimeout = (promise, ms = 6000) => Promise.race([
       promise,
       new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore request timed out")), ms))
     ]);
+    const stripUndefined = (value) => {
+      if (Array.isArray(value)) return value.map(stripUndefined);
+      if (value && typeof value === "object") {
+        return Object.fromEntries(
+          Object.entries(value)
+            .filter(([, v]) => v !== undefined)
+            .map(([k, v]) => [k, stripUndefined(v)])
+        );
+      }
+      return value;
+    };
     return {
       async load() {
         const snap = await withTimeout(stateRef.get());
@@ -51,9 +63,10 @@ const firestoreStore = (() => {
         return data?.tree && data?.notes ? { tree: data.tree, notes: data.notes } : null;
       },
       async save(data) {
+        const cleanData = stripUndefined(data);
         await stateRef.set({
-          tree: data.tree,
-          notes: data.notes,
+          tree: cleanData.tree,
+          notes: cleanData.notes,
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return true;
@@ -201,7 +214,9 @@ const flattenTree = (nodes, path = []) => {
 const findNode = (nodes, id) => { for (const n of nodes) { if (n.id === id) return n; if (n.children) { const f = findNode(n.children, id); if (f) return f; } } return null; };
 const toggleExpand = (nodes, id) => nodes.map(n => { if (n.id === id) return { ...n, expanded: !n.expanded }; if (n.children) return { ...n, children: toggleExpand(n.children, id) }; return n; });
 const addToFolder = (nodes, fid, item) => nodes.map(n => { if (n.id === fid) return { ...n, expanded: true, children: [...(n.children || []), item] }; if (n.children) return { ...n, children: addToFolder(n.children, fid, item) }; return n; });
-const removeFromTree = (nodes, id) => nodes.map(n => ({ ...n, children: n.children ? removeFromTree(n.children.filter(c => c.id !== id), id) : undefined })).filter(n => n.id !== id);
+const removeFromTree = (nodes, id) => nodes
+  .filter(n => n.id !== id)
+  .map(n => n.children ? { ...n, children: removeFromTree(n.children, id) } : n);
 const updateTreeLabel = (nodes, id, label) => nodes.map(n => { if (n.id === id) return { ...n, label }; if (n.children) return { ...n, children: updateTreeLabel(n.children, id, label) }; return n; });
 
 // Extract a node and return [extracted node, remaining tree]
