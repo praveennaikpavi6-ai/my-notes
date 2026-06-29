@@ -35,9 +35,13 @@ const firestoreStore = (() => {
     const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore(app);
     const stateRef = db.collection("knowledgeOS").doc("state");
+    const withTimeout = (promise, ms = 6000) => Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore request timed out")), ms))
+    ]);
     return {
       async load() {
-        const snap = await stateRef.get();
+        const snap = await withTimeout(stateRef.get());
         const data = snap.exists ? snap.data() : null;
         return data?.tree && data?.notes ? { tree: data.tree, notes: data.notes } : null;
       },
