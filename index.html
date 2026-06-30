@@ -9,6 +9,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-storage-compat.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body style="margin:0;padding:0;background:#0a0b0f">
@@ -36,10 +37,36 @@ const firebaseConfig = {
   appId: "1:700263841091:web:58d6acb2145a83859283f6"
 };
 
+const firebaseApp = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
+const firebaseFileStore = (() => {
+  try {
+    const storage = firebase.storage(firebaseApp);
+    return {
+      async upload(noteId, file) {
+        const safeName = file.name.replace(/[^\w.\-() ]+/g, "_");
+        const path = `attachments/${noteId}/${Date.now()}-${safeName}`;
+        const ref = storage.ref(path);
+        const snap = await ref.put(file, { contentType: file.type || "application/octet-stream" });
+        const url = await snap.ref.getDownloadURL();
+        return { id: path, name: file.name, type: file.type || "file", size: file.size, url, path, uploadedAt: new Date().toISOString() };
+      },
+      async remove(path) {
+        if (!path) return;
+        await storage.ref(path).delete();
+      }
+    };
+  } catch (e) {
+    console.warn("Firebase Storage init failed:", e);
+    return {
+      async upload() { throw new Error("Firebase Storage is not available"); },
+      async remove() {}
+    };
+  }
+})();
+
 const firestoreStore = (() => {
   try {
-    const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
-    const db = firebase.firestore(app);
+    const db = firebase.firestore(firebaseApp);
     db.settings({ ignoreUndefinedProperties: true });
     const stateRef = db.collection("knowledgeOS").doc("state");
     const withTimeout = (promise, ms = 6000) => Promise.race([
@@ -130,6 +157,8 @@ const ic = {
   recent: "M12 22a10 10 0 100-20 10 10 0 000 20zm0-10V7m0 5l3 3",
   calendar: "M3 4h18v18H3V4zm15-2v4M6 2v4M3 10h18",
   export: "M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12",
+  download: "M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3",
+  paperclip: "M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48",
   settings: "M12 15a3 3 0 100-6 3 3 0 000 6zm0 0V21m0-18v3M4.22 10.22l2.12 2.12M1 12h3m17 0h-3M19.78 10.22l-2.12 2.12M4.22 13.78l2.12-2.12M19.78 13.78l-2.12-2.12",
   folder: "M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z",
   folderOpen: "M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v1H2m0 0h20",
@@ -158,6 +187,8 @@ const ic = {
   refresh: "M23 4v6h-6M1 20v-6h6m15.5-3A9 9 0 006.4 6.4L1 12m22 0l-5.4 5.6A9 9 0 011.5 13",
   folderPlus: "M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2zM12 11v6M9 14h6",
   download: "M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3",
+  undo: "M9 14l-4-4 4-4M5 10h11a4 4 0 010 8h-1",
+  redo: "M15 14l4-4-4-4M19 10H8a4 4 0 000 8h1",
 };
 
 // ── Seed data ─────────────────────────────────────────────────────────────────
@@ -404,7 +435,7 @@ body { font-family: var(--font); background: var(--bg0); color: var(--t0); heigh
 .md-view code { font-family: var(--mono); font-size: 13px; background: var(--bg3); color: var(--teal); padding: 2px 6px; border-radius: 4px; }
 .md-view pre { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin: 14px 0; overflow-x: auto; }
 .md-view pre code { background: none; color: var(--emerald); font-size: 13px; padding: 0; }
-.md-view blockquote { border-left: 3px solid var(--accent); padding: 8px 16px; margin: 14px 0; background: rgba(124,106,247,0.06); color: var(--t1); font-style: italic; }
+.md-view blockquote { border-left: 3px solid var(--accent); padding: 8px 16px; margin: 14px 0; background: rgba(124,106,247,0.06); color: var(--t1); font-style: normal; }
 .md-view table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
 .md-view th { background: var(--bg3); color: var(--t0); padding: 9px 13px; text-align: left; font-weight: 600; border: 1px solid var(--border); }
 .md-view td { padding: 8px 13px; border: 1px solid var(--border); color: var(--t1); }
@@ -547,6 +578,45 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
 .breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--t2); margin-bottom: 16px; }
 .breadcrumb .sep { color: var(--bg4); }
 .word-count-bar { display: flex; align-items: center; gap: 12px; padding: 6px 48px; border-top: 1px solid var(--border); font-size: 11px; color: var(--t2); flex-shrink: 0; }
+.attachments-box { margin-top: 26px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg2); overflow: hidden; }
+.attachments-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.attachments-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--t1); }
+.attachment-list { display: grid; gap: 0; }
+.attachment-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.attachment-row:last-child { border-bottom: 0; }
+.attachment-main { min-width: 0; flex: 1; }
+.attachment-name { font-size: 13px; color: var(--t0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-meta { font-size: 11px; color: var(--t2); margin-top: 2px; }
+.attachment-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.attachment-empty { padding: 14px 12px; font-size: 12px; color: var(--t2); }
+/* Format toolbar */
+.fmt-bar { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; padding: 6px 10px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.fmt-btn { background: none; border: none; cursor: pointer; color: var(--t2); padding: 4px 7px; border-radius: 5px; font-size: 12px; font-weight: 600; font-family: var(--font); display: flex; align-items: center; gap: 3px; transition: all var(--tr); white-space: nowrap; }
+.fmt-btn:hover { background: var(--glass-hi); color: var(--t0); }
+.fmt-sep { width: 1px; height: 16px; background: var(--border-hi); margin: 0 3px; flex-shrink: 0; }
+.fmt-popup-wrap { position: relative; display: inline-flex; }
+.fmt-popup { position: absolute; top: calc(100% + 6px); left: 0; background: var(--bg2); border: 1px solid var(--border-hi); border-radius: 10px; padding: 10px; z-index: 500; box-shadow: 0 8px 28px rgba(0,0,0,0.5); min-width: 180px; animation: fadeUp .15s ease; }
+.fmt-popup-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--t2); margin-bottom: 8px; }
+.fmt-color-grid { display: grid; grid-template-columns: repeat(7, 22px); gap: 5px; }
+.fmt-color-swatch { width: 22px; height: 22px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: all var(--tr); flex-shrink: 0; }
+.fmt-color-swatch:hover { transform: scale(1.2); border-color: rgba(255,255,255,0.6); }
+.fmt-table-opts { display: flex; flex-direction: column; gap: 3px; }
+.fmt-table-opt { padding: 6px 10px; border-radius: 6px; font-size: 12px; color: var(--t1); cursor: pointer; transition: all var(--tr); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fmt-table-opt:hover { background: var(--glass-hi); color: var(--t0); }
+.fmt-table-bar { height: 6px; background: var(--accent); border-radius: 2px; opacity: 0.55; }
+
+/* Clickable table cells in preview */
+.md-view td, .md-view th, .html-snippet-preview td, .html-snippet-preview th { cursor: pointer; transition: background 0.15s; }
+.md-view td:hover, .html-snippet-preview td:hover { background: rgba(124,106,247,0.12) !important; }
+.md-view th:hover, .html-snippet-preview th:hover { background: rgba(124,106,247,0.22) !important; }
+.tbl-edit-hint { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--accent2); background: rgba(124,106,247,0.1); border: 1px solid rgba(124,106,247,0.25); border-radius: 5px; padding: 3px 9px; margin-bottom: 8px; }
+
+/* Table editor modal */
+.tbl-editor-cell { width: 100%; padding: 7px 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; color: var(--t1); font-size: 13px; font-family: var(--font); outline: none; box-sizing: border-box; transition: border-color 0.15s; }
+.tbl-editor-cell:focus { border-color: var(--accent); background: var(--bg2); color: var(--t0); }
+.tbl-editor-head { width: 100%; padding: 7px 10px; background: rgba(124,106,247,0.15); border: 1px solid var(--accent); border-radius: 5px; color: var(--t0); font-size: 13px; font-weight: 700; font-family: var(--font); outline: none; box-sizing: border-box; }
+.tbl-editor-head:focus { background: rgba(124,106,247,0.25); }
+
 .mobile-focus-btn, .mobile-focus-sep { display: none; }
 .md-view img, .html-snippet-preview img { max-width: 100%; height: auto; }
 .md-view table, .html-snippet-preview table { max-width: 100%; }
@@ -753,43 +823,177 @@ function TreeNode({ node, depth, selId, onSelect, onToggle, onRename, onDelete, 
 }
 
 // ── KnowledgeGraph ────────────────────────────────────────────────────────────
-function KnowledgeGraph({ tree }) {
-  const ref = useRef(null);
+function KnowledgeGraph({ tree, notes, onFolderClick }) {
+  const [hovered, setHovered] = useState(null);
+  const [dims, setDims] = useState({ W: 700, H: 280 });
+  const wrapRef = useRef(null);
+  const animRef = useRef(null);
+  const [tick, setTick] = useState(0);
+
   useEffect(() => {
-    const canvas = ref.current; if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const W = canvas.offsetWidth || 600, H = 200;
-    canvas.width = W; canvas.height = H;
-    const items = flattenTree(tree).filter(n => n.type === "folder").slice(0, 9);
-    const colors = ["#a78bfa", "#22d3ee", "#fbbf24", "#34d399", "#f472b6", "#f97316", "#60a5fa", "#e879f9", "#a3e635"];
-    const nodes = items.map((n, i) => ({
-      x: i === 0 ? W * 0.5 : W * (0.5 + 0.4 * Math.cos(2 * Math.PI * (i - 1) / Math.min(items.length - 1, 8))),
-      y: i === 0 ? H * 0.5 : H * (0.5 + 0.38 * Math.sin(2 * Math.PI * (i - 1) / Math.min(items.length - 1, 8))),
-      r: i === 0 ? 14 : 9, label: n.label.slice(0, 11), color: colors[i % colors.length]
-    }));
-    const edges = nodes.slice(1).map((_, i) => [0, i + 1]);
-    let raf, t = 0;
-    const draw = ts => {
-      t = ts; ctx.clearRect(0, 0, W, H);
-      edges.forEach(([a, b]) => {
-        if (!nodes[b]) return;
-        ctx.strokeStyle = `rgba(124,106,247,${0.18 + 0.12 * Math.sin(t / 1200 + a)})`;
-        ctx.lineWidth = 1; ctx.setLineDash([4, 4]); ctx.lineDashOffset = -t / 55;
-        ctx.beginPath(); ctx.moveTo(nodes[a].x, nodes[a].y); ctx.lineTo(nodes[b].x, nodes[b].y); ctx.stroke();
-      });
-      ctx.setLineDash([]);
-      nodes.forEach(n => {
-        ctx.fillStyle = n.color + "20"; ctx.strokeStyle = n.color; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        ctx.fillStyle = "#f0f2ff"; ctx.font = "10px Inter"; ctx.textAlign = "center";
-        ctx.fillText(n.label, n.x, n.y + n.r + 12);
-      });
-      raf = requestAnimationFrame(draw);
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0].contentRect.width;
+      setDims({ W: w || 700, H: Math.min(300, Math.max(220, w * 0.35)) });
+    });
+    if (wrapRef.current) ro.observe(wrapRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let frame, start;
+    const loop = (ts) => {
+      if (!start) start = ts;
+      setTick(ts - start);
+      frame = requestAnimationFrame(loop);
     };
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
-  }, [tree]);
-  return <canvas ref={ref} style={{ width: "100%", height: 200, display: "block" }} />;
+    frame = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  const COLORS = ["#a78bfa","#22d3ee","#fbbf24","#34d399","#f472b6","#f97316","#60a5fa","#e879f9","#a3e635","#fb7185"];
+
+  // Build nodes: top-level folders = inner ring, sub-folders = outer ring
+  const topFolders = tree.filter(n => n.type === "folder");
+  const allFlat = flattenTree(tree);
+
+  const getNoteCount = (folderId) => {
+    const node = findNode(tree, folderId);
+    if (!node) return 0;
+    return flattenTree([node]).filter(n => n.type === "note").length;
+  };
+
+  const { W, H } = dims;
+  const cx = W / 2, cy = H / 2;
+  const innerR = Math.min(W, H) * 0.28;
+  const outerR = Math.min(W, H) * 0.44;
+
+  // Center hub
+  const hubNode = { id: "__hub__", label: "Knowledge\nOS", x: cx, y: cy, r: 22, color: "#7c6af7", isHub: true };
+
+  // Top-level folder nodes (inner ring)
+  const innerNodes = topFolders.slice(0, 8).map((f, i) => {
+    const angle = (2 * Math.PI * i / Math.max(topFolders.length, 1)) - Math.PI / 2;
+    return {
+      id: f.id, label: f.label, x: cx + innerR * Math.cos(angle), y: cy + innerR * Math.sin(angle),
+      r: 14, color: COLORS[i % COLORS.length], noteCount: getNoteCount(f.id),
+      children: f.children?.filter(c => c.type === "folder") || [], isHub: false, angle
+    };
+  });
+
+  // Sub-folder nodes (outer ring) — only for hovered top-level
+  const outerNodes = [];
+  if (hovered && hovered !== "__hub__") {
+    const parent = innerNodes.find(n => n.id === hovered);
+    if (parent) {
+      parent.children.slice(0, 6).forEach((sf, i) => {
+        const spreadAngle = parent.angle + (i - (parent.children.length - 1) / 2) * 0.45;
+        outerNodes.push({
+          id: sf.id, label: sf.label, x: cx + outerR * Math.cos(spreadAngle), y: cy + outerR * Math.sin(spreadAngle),
+          r: 10, color: parent.color + "cc", noteCount: getNoteCount(sf.id), parentId: hovered, isHub: false
+        });
+      });
+    }
+  }
+
+  const allNodes = [hubNode, ...innerNodes, ...outerNodes];
+
+  // Edges
+  const edges = [
+    ...innerNodes.map(n => ({ from: hubNode, to: n })),
+    ...outerNodes.map(n => ({ from: innerNodes.find(p => p.id === n.parentId), to: n })),
+  ].filter(e => e.from && e.to);
+
+  const dashOffset = -(tick / 40) % 16;
+
+  return (
+    <div ref={wrapRef} style={{ width: "100%", cursor: "default" }}>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: "block", userSelect: "none" }}>
+        <defs>
+          <radialGradient id="hubGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#a78bfa" stopOpacity="0.9"/>
+            <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.7"/>
+          </radialGradient>
+        </defs>
+
+        {/* Edges */}
+        {edges.map((e, i) => (
+          <line key={i}
+            x1={e.from.x} y1={e.from.y} x2={e.to.x} y2={e.to.y}
+            stroke={hovered === e.to.id ? e.to.color || "#7c6af7" : "rgba(124,106,247,0.25)"}
+            strokeWidth={hovered === e.to.id ? 1.5 : 1}
+            strokeDasharray="5,5"
+            strokeDashoffset={dashOffset}
+            style={{ transition: "stroke 0.2s" }}
+          />
+        ))}
+
+        {/* Outer (sub-folder) nodes */}
+        {outerNodes.map(n => (
+          <g key={n.id} style={{ cursor: "pointer" }}
+            onClick={() => onFolderClick && onFolderClick({ id: n.id, label: n.label })}
+            onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(hovered === n.id ? n.parentId : hovered)}>
+            <circle cx={n.x} cy={n.y} r={n.r + 4} fill={n.color} opacity="0.08"/>
+            <circle cx={n.x} cy={n.y} r={n.r} fill={n.color + "22"} stroke={n.color} strokeWidth="1.5"/>
+            <text x={n.x} y={n.y + n.r + 13} textAnchor="middle" fill="#b8bdd4" fontSize="10" fontFamily="Inter">
+              {n.label.length > 13 ? n.label.slice(0, 12) + "…" : n.label}
+            </text>
+            {n.noteCount > 0 && (
+              <text x={n.x} y={n.y + 4} textAnchor="middle" fill={n.color} fontSize="9" fontWeight="700">{n.noteCount}</text>
+            )}
+          </g>
+        ))}
+
+        {/* Inner (top-level folder) nodes */}
+        {innerNodes.map(n => {
+          const isHov = hovered === n.id;
+          return (
+            <g key={n.id} style={{ cursor: "pointer" }}
+              onClick={() => onFolderClick && onFolderClick({ id: n.id, label: n.label })}
+              onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(null)}>
+              {/* Pulse ring on hover */}
+              {isHov && <circle cx={n.x} cy={n.y} r={n.r + 10} fill={n.color} opacity="0.12"/>}
+              <circle cx={n.x} cy={n.y} r={n.r + 4} fill={n.color} opacity={isHov ? 0.15 : 0.06} style={{transition:"opacity 0.2s"}}/>
+              <circle cx={n.x} cy={n.y} r={n.r} fill={n.color + "30"} stroke={n.color} strokeWidth={isHov ? 2.5 : 1.8} style={{transition:"stroke-width 0.2s"}}/>
+              {/* Note count inside circle */}
+              <text x={n.x} y={n.y + 4} textAnchor="middle" fill={isHov ? n.color : "#f0f2ff"} fontSize={n.noteCount > 9 ? "9" : "11"} fontWeight="700" fontFamily="Inter">
+                {n.noteCount || ""}
+              </text>
+              {/* Label below */}
+              <text x={n.x} y={n.y + n.r + 14} textAnchor="middle" fill={isHov ? "#f0f2ff" : "#b8bdd4"} fontSize="11" fontWeight={isHov ? "600" : "400"} fontFamily="Inter" style={{transition:"fill 0.2s"}}>
+                {n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label}
+              </text>
+              {/* Sub-folder count hint */}
+              {n.children.length > 0 && (
+                <text x={n.x} y={n.y + n.r + 26} textAnchor="middle" fill={n.color} fontSize="9" fontFamily="Inter" opacity="0.7">
+                  {n.children.length} sub-folder{n.children.length > 1 ? "s" : ""}
+                </text>
+              )}
+              {/* Click hint on hover */}
+              {isHov && (
+                <text x={n.x} y={n.y + n.r + (n.children.length > 0 ? 38 : 26)} textAnchor="middle" fill="#6e7491" fontSize="9" fontFamily="Inter">
+                  click to open
+                </text>
+              )}
+            </g>
+          );
+        })}
+
+        {/* Hub node */}
+        <g style={{ cursor: "default" }}
+          onMouseEnter={() => setHovered("__hub__")} onMouseLeave={() => setHovered(null)}>
+          <circle cx={cx} cy={cy} r={hubNode.r + 8} fill="url(#hubGrad)" opacity="0.12"/>
+          <circle cx={cx} cy={cy} r={hubNode.r} fill="rgba(124,106,247,0.2)" stroke="#7c6af7" strokeWidth="2"/>
+          <text x={cx} y={cy - 3} textAnchor="middle" fill="#f0f2ff" fontSize="8" fontWeight="700" fontFamily="Inter">Know</text>
+          <text x={cx} y={cy + 7} textAnchor="middle" fill="#a78bfa" fontSize="8" fontWeight="700" fontFamily="Inter">ledge</text>
+        </g>
+
+        {/* Legend */}
+        <text x={12} y={H - 8} fill="#6e7491" fontSize="10" fontFamily="Inter">
+          Hover a folder to see sub-folders · Click to open
+        </text>
+      </svg>
+    </div>
+  );
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -862,6 +1066,136 @@ function NewFolderModal({ tree, onClose, onCreate, defaultFolderId }) {
   );
 }
 
+// ── TableEditorModal ──────────────────────────────────────────────────────────
+function TableEditorModal({ data, onSave, onCancel }) {
+  const [headers, setHeaders] = useState([...data.headers]);
+  const [rows, setRows] = useState(data.rows.map(r => [...r]));
+  const [tableWidth, setTableWidth] = useState(data.width || "100%");
+
+  const updateHeader = (i, v) => setHeaders(h => h.map((x, j) => j === i ? v : x));
+  const updateCell = (ri, ci, v) => setRows(rs => rs.map((row, r) => r === ri ? row.map((c, j) => j === ci ? v : c) : row));
+  const addRow = () => setRows(rs => [...rs, Array(headers.length).fill("")]);
+  const removeRow = (i) => setRows(rs => rs.filter((_, j) => j !== i));
+  const addCol = () => { setHeaders(h => [...h, `Header ${h.length + 1}`]); setRows(rs => rs.map(r => [...r, ""])); };
+  const removeCol = (i) => { setHeaders(h => h.filter((_, j) => j !== i)); setRows(rs => rs.map(r => r.filter((_, j) => j !== i))); };
+
+  const handleSave = () => {
+    const w = tableWidth === "auto" ? "" : `width:${tableWidth};`;
+    const th = `padding:8px 12px;background:#252840;color:#f0f2ff;border:1px solid #3d4060;text-align:left`;
+    const td = `padding:8px 12px;border:1px solid #3d4060`;
+    const ths = headers.map(h => `<th style="${th}">${h || "&nbsp;"}</th>`).join("");
+    const trs = rows.map(row => `<tr>${row.map(c => `<td style="${td}">${c || "&nbsp;"}</td>`).join("")}</tr>`).join("\n  ");
+    const html = `<table style="${w}border-collapse:collapse">\n<thead><tr>${ths}</tr></thead>\n<tbody>\n  ${trs}\n</tbody>\n</table>`;
+    onSave(html);
+  };
+
+  const cellRefs = useRef({});
+  const focusCell = (ri, ci) => {
+    const key = `${ri}-${ci}`;
+    setTimeout(() => cellRefs.current[key]?.focus(), 0);
+  };
+
+  return (
+    <div className="modal-bg" onClick={e => e.target === e.currentTarget && onCancel()}>
+      <div className="modal" style={{ width:"min(94vw,900px)", maxHeight:"90vh", display:"flex", flexDirection:"column", padding:0, overflow:"hidden", borderRadius:14 }}>
+
+        {/* Header bar */}
+        <div style={{ padding:"14px 18px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", gap:10, flexShrink:0, background:"var(--bg1)" }}>
+          <span style={{ fontSize:15, fontWeight:700, color:"var(--t0)", flex:1 }}>✏️ Edit Table</span>
+          <span style={{ fontSize:11, color:"var(--t2)", marginRight:4 }}>Width:</span>
+          {["25%","50%","75%","100%","auto"].map(w => (
+            <button key={w} onClick={() => setTableWidth(w)} className="fmt-btn"
+              style={{ padding:"3px 9px", border:`1px solid ${tableWidth===w?"var(--accent)":"var(--border)"}`, color: tableWidth===w?"var(--accent2)":"var(--t2)", background: tableWidth===w?"rgba(124,106,247,0.1)":"none", borderRadius:6 }}>
+              {w}
+            </button>
+          ))}
+          <div style={{ width:1, height:18, background:"var(--border)", margin:"0 6px" }}/>
+          <button className="ibtn" onClick={onCancel} title="Close"><Icon d={ic.close} size={15}/></button>
+        </div>
+
+        {/* Toolbar */}
+        <div style={{ padding:"10px 18px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", gap:8, flexShrink:0, flexWrap:"wrap" }}>
+          <button className="btn btn-ghost" style={{ fontSize:12, padding:"5px 12px" }} onClick={addRow}>
+            <Icon d={ic.plus} size={12}/> Add Row
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize:12, padding:"5px 12px" }} onClick={addCol}>
+            <Icon d={ic.plus} size={12}/> Add Column
+          </button>
+          <span style={{ fontSize:11, color:"var(--t2)", marginLeft:6 }}>
+            {headers.length} col{headers.length!==1?"s":""} × {rows.length} row{rows.length!==1?"s":""}
+          </span>
+          <span style={{ fontSize:11, color:"var(--t2)", marginLeft:4 }}>· Click any cell to edit · Tab to move right · Enter to add row</span>
+        </div>
+
+        {/* Table grid */}
+        <div style={{ flex:1, overflow:"auto", padding:18 }}>
+          <div style={{ overflowX:"auto" }}>
+            <table style={{ borderCollapse:"collapse", width:"100%", minWidth: headers.length * 130 }}>
+              <thead>
+                <tr>
+                  <th style={{ width:28, background:"var(--bg3)", border:"1px solid var(--border)" }}/>
+                  {headers.map((h, ci) => (
+                    <th key={ci} style={{ padding:4, background:"var(--bg3)", border:"1px solid var(--border)", position:"relative", minWidth:120 }}>
+                      <input className="tbl-editor-head" value={h}
+                        placeholder={`Header ${ci+1}`}
+                        onChange={e => updateHeader(ci, e.target.value)}
+                        onKeyDown={e => { if(e.key==="Tab"){e.preventDefault(); ci<headers.length-1?focusCell("h",ci+1):focusCell(0,0);} }}
+                        ref={el => { cellRefs.current[`h-${ci}`] = el; }}
+                      />
+                      {headers.length > 1 && (
+                        <button onClick={() => removeCol(ci)} title="Remove column"
+                          style={{ position:"absolute", top:2, right:2, width:16, height:16, background:"rgba(244,114,182,0.2)", border:"none", borderRadius:3, color:"var(--rose)", cursor:"pointer", fontSize:11, lineHeight:"16px", textAlign:"center", padding:0 }}>×</button>
+                      )}
+                    </th>
+                  ))}
+                  <th style={{ width:28, background:"var(--bg3)", border:"1px solid var(--border)" }}/>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri} style={{ background: ri%2===0?"transparent":"rgba(255,255,255,0.02)" }}>
+                    <td style={{ padding:"4px 6px", textAlign:"center", fontSize:10, color:"var(--t2)", border:"1px solid var(--border)", background:"var(--bg3)", width:28 }}>{ri+1}</td>
+                    {row.map((cell, ci) => (
+                      <td key={ci} style={{ padding:4, border:"1px solid var(--border)" }}>
+                        <input className="tbl-editor-cell" value={cell}
+                          placeholder="—"
+                          ref={el => { cellRefs.current[`${ri}-${ci}`] = el; }}
+                          onChange={e => updateCell(ri, ci, e.target.value)}
+                          onKeyDown={e => {
+                            if(e.key==="Tab"){ e.preventDefault(); ci<row.length-1?focusCell(ri,ci+1):ri<rows.length-1?focusCell(ri+1,0):addRow(); }
+                            if(e.key==="Enter"){ e.preventDefault(); ri===rows.length-1?addRow():focusCell(ri+1,ci); }
+                          }}
+                        />
+                      </td>
+                    ))}
+                    <td style={{ padding:"4px 2px", textAlign:"center", border:"1px solid var(--border)" }}>
+                      {rows.length > 1 && (
+                        <button onClick={() => removeRow(ri)} title="Delete row"
+                          style={{ background:"none", border:"none", color:"var(--t2)", cursor:"pointer", fontSize:14, padding:"2px 5px", borderRadius:4, lineHeight:1 }}
+                          onMouseEnter={e => e.currentTarget.style.color="var(--rose)"}
+                          onMouseLeave={e => e.currentTarget.style.color="var(--t2)"}>✕</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding:"12px 18px", borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-between", alignItems:"center", flexShrink:0, background:"var(--bg1)" }}>
+          <span style={{ fontSize:11, color:"var(--t2)" }}>Changes replace the original table in your note</span>
+          <div style={{ display:"flex", gap:10 }}>
+            <button className="btn btn-ghost" onClick={onCancel}>Cancel</button>
+            <button className="btn btn-primary" onClick={handleSave}><Icon d={ic.check} size={13} stroke="#fff"/> Save Table</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── NoteEditor ────────────────────────────────────────────────────────────────
 function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFocus, onToggleMobileFocus }) {
   const [title, setTitle] = useState(note.title || "");
@@ -873,6 +1207,123 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   const [preview, setPreview] = useState(true); // ← DEFAULT PREVIEW ON
   const [saved, setSaved] = useState(true);
   const timer = useRef(null);
+  const textareaRef = useRef(null);
+
+  // ── Undo / Redo history ────────────────────────────────────────────────────
+  // Key insight: push the OLD content (before change) onto undoStack.
+  // lastSaved tracks the "committed" snapshot so we know what to push.
+  const undoStack = useRef([]);
+  const redoStack = useRef([]);
+  const histTimer = useRef(null);
+  const lastSaved = useRef(note.content || ""); // tracks last committed snapshot
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  const syncUndoRedo = () => {
+    setCanUndo(undoStack.current.length > 0);
+    setCanRedo(redoStack.current.length > 0);
+  };
+
+  // Called with newVal — debounced so rapid typing = one history entry
+  // Pushes the PREVIOUS snapshot (lastSaved) before committing the new value
+  const pushHistory = (newVal) => {
+    const snapshot = lastSaved.current;         // OLD content before this burst
+    clearTimeout(histTimer.current);
+    histTimer.current = setTimeout(() => {
+      if (snapshot === newVal) return;          // nothing actually changed
+      undoStack.current = [...undoStack.current.slice(-99), snapshot];
+      redoStack.current = [];                   // new edit clears redo
+      lastSaved.current = newVal;               // commit the new value
+      syncUndoRedo();
+    }, 800);
+  };
+
+  // Apply content from undo/redo — does NOT push to history
+  const applyHistory = (val) => {
+    lastSaved.current = val;                    // update snapshot so next edit pushes correctly
+    setContent(val);
+    setSaved(false);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => save(title, val, tags, pinned, archived, color), 700);
+  };
+
+  const undo = () => {
+    if (undoStack.current.length === 0) return;
+    clearTimeout(histTimer.current); // cancel any pending history push — it would wipe redoStack
+    const prev = undoStack.current[undoStack.current.length - 1];
+    undoStack.current = undoStack.current.slice(0, -1);
+    redoStack.current = [lastSaved.current, ...redoStack.current.slice(0, 99)];
+    applyHistory(prev);
+    syncUndoRedo();
+    onToast("Undo", ic.undo);
+  };
+
+  const redo = () => {
+    if (redoStack.current.length === 0) return;
+    clearTimeout(histTimer.current); // cancel any pending history push
+    const next = redoStack.current[0];
+    redoStack.current = redoStack.current.slice(1);
+    undoStack.current = [...undoStack.current.slice(-99), lastSaved.current];
+    applyHistory(next);
+    syncUndoRedo();
+    onToast("Redo", ic.redo);
+  };
+
+  // Reset when switching notes
+  useEffect(() => {
+    undoStack.current = [];
+    redoStack.current = [];
+    lastSaved.current = note.content || "";
+    syncUndoRedo();
+  }, [noteId]);
+
+  // Keyboard shortcuts: Ctrl+Z = undo, Ctrl+Y / Ctrl+Shift+Z = redo
+  useEffect(() => {
+    const handler = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      if (e.key === "y" || (e.key === "z" && e.shiftKey)) { e.preventDefault(); redo(); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [content, tags, pinned, archived, color]);
+
+  const insertFormat = (before, after = "", placeholder = "text") => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart, end = ta.selectionEnd;
+    const selected = content.slice(start, end) || placeholder;
+    const newText = content.slice(0, start) + before + selected + after + content.slice(end);
+    setContent(newText);
+    sched(title, newText, tags, pinned, archived, color);
+    setTimeout(() => {
+      ta.focus();
+      const newCursor = start + before.length + selected.length + after.length;
+      ta.setSelectionRange(newCursor, newCursor);
+    }, 10);
+  };
+
+  const insertLine = (prefix) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const lineStart = content.lastIndexOf("\n", start - 1) + 1;
+    const newText = content.slice(0, lineStart) + prefix + content.slice(lineStart);
+    setContent(newText);
+    sched(title, newText, tags, pinned, archived, color);
+    setTimeout(() => { ta.focus(); ta.setSelectionRange(start + prefix.length, start + prefix.length); }, 10);
+  };
+
+  const insertTable = () => {
+    const tbl = "\n| Header 1 | Header 2 | Header 3 |\n|----------|----------|----------|\n| Cell 1   | Cell 2   | Cell 3   |\n| Cell 4   | Cell 5   | Cell 6   |\n";
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const pos = ta.selectionStart;
+    const newText = content.slice(0, pos) + tbl + content.slice(pos);
+    setContent(newText);
+    sched(title, newText, tags, pinned, archived, color);
+    setTimeout(() => { ta.focus(); }, 10);
+  };
 
   useEffect(() => {
     setTitle(note.title || ""); setContent(note.content || ""); setTags(note.tags || []);
@@ -885,7 +1336,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     onUpdate(noteId, { title: t, content: c, tags: tg, pinned: p, archived: ar, color: cl, wordCount: wc, updated: new Date().toISOString().split("T")[0] });
     setSaved(true);
   };
-  const sched = (t, c, tg, p, ar, cl) => { setSaved(false); clearTimeout(timer.current); timer.current = setTimeout(() => save(t, c, tg, p, ar, cl), 700); };
+  const sched = (t, c, tg, p, ar, cl) => { setSaved(false); pushHistory(c); clearTimeout(timer.current); timer.current = setTimeout(() => save(t, c, tg, p, ar, cl), 700); };
 
   const words = content.trim() ? content.trim().split(/\s+/).length : 0;
   const COLORS = ["", "#FFF3CD", "#D4EDDA", "#CCE5FF", "#F8D7DA", "#E2D9F3", "#FFE4CC"];
@@ -902,27 +1353,46 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   })();
 
   // ── Render preview based on content type ─────────────────────────────────
+  // ── Advanced Edit (contenteditable preview) ───────────────────────────────
+  const [advancedEdit, setAdvancedEdit] = useState(false);
+  const advEditRef = useRef(null);
+
+  useEffect(() => {
+    if (advancedEdit && advEditRef.current) {
+      const html = (contentType === "html-snippet" || contentType === "html-doc")
+        ? content : renderMD(content);
+      advEditRef.current.innerHTML = html;
+      advEditRef.current.focus();
+    }
+  }, [advancedEdit]);
+
+  // Reset advanced edit when note changes
+  useEffect(() => { setAdvancedEdit(false); }, [noteId]);
+
+  const saveAdvancedEdit = () => {
+    if (!advEditRef.current) return;
+    const newContent = advEditRef.current.innerHTML;
+    setContent(newContent);
+    sched(title, newContent, tags, pinned, archived, color);
+    setAdvancedEdit(false);
+    onToast("Changes saved", ic.check);
+  };
+
   const renderPreview = () => {
     if (contentType === "html-doc") {
-      // Full HTML doc → render in sandboxed iframe
       return (
-        <iframe
-          srcDoc={content}
-          className="html-preview-frame"
+        <iframe srcDoc={content} className="html-preview-frame"
           style={{ width: "100%", minHeight: 600, border: "none", borderRadius: 8, background: "#fff" }}
-          sandbox="allow-scripts allow-same-origin"
-          title="HTML Preview"
-        />
+          sandbox="allow-scripts allow-same-origin" title="HTML Preview" />
       );
     }
     if (contentType === "html-snippet") {
-      // HTML snippet → render directly with dark theme wrapper
       return (
-        <div className="html-snippet-preview" style={{ background: "var(--bg3)", borderRadius: 8, padding: 16, minHeight: 200 }}
+        <div className="html-snippet-preview"
+          style={{ background: "var(--bg3)", borderRadius: 8, padding: 16, minHeight: 200 }}
           dangerouslySetInnerHTML={{ __html: content }} />
       );
     }
-    // Markdown (default)
     return <div className="md-view" dangerouslySetInnerHTML={{ __html: renderMD(content) }} />;
   };
 
@@ -934,6 +1404,96 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     setTagVal(""); setTagInput(false);
   };
   const removeTag = tg => { const nt = tags.filter(x => x !== tg); setTags(nt); sched(title, content, nt, pinned, archived, color); };
+
+  const [tableEdit, setTableEdit] = useState(null); // { original, data }
+
+  const handleTableClick = (e) => {
+    const cell = e.target.closest("td, th");
+    if (!cell) return;
+    const table = cell.closest("table");
+    if (!table) return;
+
+    // Parse headers
+    const headRow = table.querySelector("thead tr") || table.querySelector("tr");
+    const headers = headRow ? Array.from(headRow.querySelectorAll("th, td")).map(c => c.textContent.replace(/ /g,"").trim()) : [];
+
+    // Parse body rows
+    const bodyEl = table.querySelector("tbody");
+    const bodyRows = bodyEl
+      ? Array.from(bodyEl.querySelectorAll("tr"))
+      : Array.from(table.querySelectorAll("tr")).slice(1);
+    const rows = bodyRows.map(tr => Array.from(tr.querySelectorAll("td, th")).map(c => c.textContent.replace(/ /g,"").trim()));
+
+    // Detect width from style
+    const styleAttr = table.getAttribute("style") || "";
+    const widthMatch = styleAttr.match(/width\s*:\s*([^;]+)/i);
+    const width = widthMatch ? widthMatch[1].trim() : "100%";
+
+    if (headers.length === 0 && rows.length === 0) return;
+    setTableEdit({ original: table.outerHTML, data: { headers: headers.length ? headers : ["Header 1"], rows: rows.length ? rows : [["Cell 1"]], width } });
+  };
+
+  const saveTableEdit = (newHtml) => {
+    // Replace original table HTML in content — try exact match first, then fallback
+    let newContent = content;
+    if (content.includes(tableEdit.original)) {
+      newContent = content.replace(tableEdit.original, newHtml);
+    } else {
+      // Markdown table — append as HTML (handles both cases)
+      const mdTableRe = /(\|.+\|\n)+/g;
+      if (mdTableRe.test(content)) {
+        newContent = content.replace(mdTableRe, newHtml + "\n");
+      } else {
+        newContent = content + "\n" + newHtml;
+      }
+    }
+    setContent(newContent);
+    sched(title, newContent, tags, pinned, archived, color);
+    setTableEdit(null);
+    onToast("Table saved", ic.check);
+  };
+
+  const [fmtColorOpen, setFmtColorOpen] = useState(false);
+  const [fmtTableOpen, setFmtTableOpen] = useState(false);
+
+  const FONT_COLORS = [
+    { c: "#ef4444", n: "Red" }, { c: "#f97316", n: "Orange" }, { c: "#eab308", n: "Yellow" },
+    { c: "#22c55e", n: "Green" }, { c: "#06b6d4", n: "Cyan" }, { c: "#3b82f6", n: "Blue" },
+    { c: "#a855f7", n: "Purple" }, { c: "#ec4899", n: "Pink" }, { c: "#f0f2ff", n: "White" },
+    { c: "#94a3b8", n: "Gray" }, { c: "#78350f", n: "Brown" }, { c: "#0f172a", n: "Black" },
+    { c: "#fde68a", n: "LightYellow" }, { c: "#bbf7d0", n: "LightGreen" },
+  ];
+
+  const insertColor = (hex) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart, end = ta.selectionEnd;
+    const selected = content.slice(start, end) || "colored text";
+    const tag = `<span style="color:${hex}">${selected}</span>`;
+    const newText = content.slice(0, start) + tag + content.slice(end);
+    setContent(newText);
+    sched(title, newText, tags, pinned, archived, color);
+    setFmtColorOpen(false);
+    setTimeout(() => { ta.focus(); }, 10);
+  };
+
+  const insertHtmlTable = (width, cols, rows) => {
+    const wStyle = width === "auto" ? "" : ` style="width:${width};border-collapse:collapse"`;
+    const thStyle = ` style="padding:8px 12px;background:#252840;color:#f0f2ff;border:1px solid #3d4060;text-align:left"`;
+    const tdStyle = ` style="padding:8px 12px;border:1px solid #3d4060"`;
+    const headers = Array.from({length: cols}, (_, i) => `<th${thStyle}>Header ${i+1}</th>`).join("");
+    const cells = Array.from({length: cols}, (_, i) => `<td${tdStyle}>Cell ${i+1}</td>`).join("");
+    const bodyRows = Array.from({length: rows}, () => `<tr>${cells}</tr>`).join("\n  ");
+    const tbl = `\n<table${wStyle}>\n  <thead><tr>${headers}</tr></thead>\n  <tbody>\n  ${bodyRows}\n  </tbody>\n</table>\n`;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const pos = ta.selectionStart;
+    const newText = content.slice(0, pos) + tbl + content.slice(pos);
+    setContent(newText);
+    sched(title, newText, tags, pinned, archived, color);
+    setFmtTableOpen(false);
+    setTimeout(() => { ta.focus(); }, 10);
+  };
 
   const copyContent = () => { navigator.clipboard.writeText(content); onToast("Copied to clipboard", ic.check); };
   const exportHTML = () => {
@@ -964,11 +1524,32 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {tableEdit && (
+        <TableEditorModal
+          data={tableEdit.data}
+          onSave={saveTableEdit}
+          onCancel={() => setTableEdit(null)}
+        />
+      )}
       <div className="toolbar">
         <button className="tbtn mobile-focus-btn" onClick={onToggleMobileFocus}>
           <Icon d={mobileFocus ? ic.minimize : ic.maximize} size={13} /> {mobileFocus ? "Minimize" : "Full screen"}
         </button>
         <div className="tsep mobile-focus-sep" />
+
+        {/* Undo / Redo */}
+        <button className="tbtn" onClick={undo} disabled={!canUndo}
+          title="Undo (Ctrl+Z)"
+          style={{ opacity: canUndo ? 1 : 0.35, cursor: canUndo ? "pointer" : "not-allowed" }}>
+          <Icon d={ic.undo} size={14} /> Undo
+        </button>
+        <button className="tbtn" onClick={redo} disabled={!canRedo}
+          title="Redo (Ctrl+Y)"
+          style={{ opacity: canRedo ? 1 : 0.35, cursor: canRedo ? "pointer" : "not-allowed" }}>
+          <Icon d={ic.redo} size={14} /> Redo
+        </button>
+        <div className="tsep" />
+
         <div className="color-row">
           {COLORS.map(c => (
             <div key={c} className={`cp${color === c ? " sel" : ""}`}
@@ -984,9 +1565,30 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
           <Icon d={ic.archive} size={13} /> {archived ? "Archived" : "Archive"}
         </button>
         <div className="tsep" />
-        <button className={`tbtn${!preview ? " on" : ""}`} onClick={() => setPreview(p => !p)}>
+        <button className={`tbtn${!preview ? " on" : ""}`} onClick={() => { setPreview(p => !p); setAdvancedEdit(false); }}>
           <Icon d={ic.edit} size={13} /> {preview ? "Edit" : "Editing…"}
         </button>
+        {/* Advanced Edit — only in preview mode */}
+        {preview && contentType !== "html-doc" && (
+          <>
+            <div className="tsep" />
+            {advancedEdit ? (
+              <>
+                <button className="tbtn on" style={{ color:"var(--emerald)" }} onClick={saveAdvancedEdit}>
+                  <Icon d={ic.check} size={13} /> Save Changes
+                </button>
+                <button className="tbtn danger" onClick={() => setAdvancedEdit(false)}>
+                  <Icon d={ic.close} size={13} /> Cancel
+                </button>
+              </>
+            ) : (
+              <button className="tbtn" style={{ background:"rgba(124,106,247,0.1)", color:"var(--accent2)", border:"1px solid rgba(124,106,247,0.3)", borderRadius:6 }}
+                onClick={() => setAdvancedEdit(true)} title="Edit content directly in preview — tables, text, everything">
+                <Icon d={ic.sparkle} size={13} /> Advanced Edit
+              </button>
+            )}
+          </>
+        )}
         {/* Content type badge */}
         <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 99, background: contentType === "html-doc" ? "rgba(251,191,36,0.15)" : contentType === "html-snippet" ? "rgba(34,211,238,0.12)" : "rgba(124,106,247,0.12)", color: contentType === "html-doc" ? "var(--amber)" : contentType === "html-snippet" ? "var(--teal)" : "var(--accent2)", fontWeight: 600, whiteSpace: "nowrap" }}>
           {contentType === "html-doc" ? "HTML DOC" : contentType === "html-snippet" ? "HTML" : "MARKDOWN"}
@@ -1046,10 +1648,158 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
             {pinned && <span className="badge badge-purple">Pinned</span>}
             {archived && <span className="badge badge-amber">Archived</span>}
           </div>
+          {/* ── Formatting toolbar — shown in Edit mode AND Advanced Edit mode ── */}
+          {(!preview || advancedEdit) && (() => {
+            // Helper: in advanced edit, use execCommand (keeps focus on contenteditable)
+            const adv = advancedEdit;
+            const cmd = (e, command, val) => { e.preventDefault(); document.execCommand(command, false, val || null); };
+            const ins = (e, html) => { e.preventDefault(); document.execCommand('insertHTML', false, html); };
+            const getSel = () => { const s = window.getSelection(); return s && s.toString() ? s.toString() : null; };
+
+            const doColor = (e, hex) => {
+              if (adv) { e.preventDefault(); document.execCommand('foreColor', false, hex); setFmtColorOpen(false); }
+              else insertColor(hex);
+            };
+            const doTable = (e, w, cols, rows) => {
+              if (adv) {
+                const th = `padding:8px 12px;background:#252840;color:#f0f2ff;border:1px solid #3d4060;text-align:left`;
+                const td = `padding:8px 12px;border:1px solid #3d4060`;
+                const wStyle = w === "auto" ? "" : `width:${w};`;
+                const ths = Array.from({length:cols},(_,i)=>`<th style="${th}">Header ${i+1}</th>`).join("");
+                const tds = Array.from({length:cols},(_,i)=>`<td style="${td}">Cell ${i+1}</td>`).join("");
+                const trs = Array.from({length:rows},()=>`<tr>${tds}</tr>`).join("");
+                ins(e, `<table style="${wStyle}border-collapse:collapse"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`);
+                setFmtTableOpen(false);
+              } else { insertHtmlTable(w, cols, rows); }
+            };
+
+            return (
+              <div className="fmt-bar">
+                {/* Bold / Italic / Strike */}
+                <button className="fmt-btn" title="Bold"
+                  onMouseDown={adv ? e => cmd(e,'bold') : undefined}
+                  onClick={!adv ? () => insertFormat("**","**","bold text") : undefined}><b>B</b></button>
+                <button className="fmt-btn" title="Italic"
+                  onMouseDown={adv ? e => cmd(e,'italic') : undefined}
+                  onClick={!adv ? () => insertFormat("*","*","italic text") : undefined}><i>I</i></button>
+                <button className="fmt-btn" title="Strikethrough" style={{textDecoration:"line-through"}}
+                  onMouseDown={adv ? e => cmd(e,'strikeThrough') : undefined}
+                  onClick={!adv ? () => insertFormat("~~","~~","strikethrough") : undefined}>S</button>
+
+                {/* Font Color */}
+                <div className="fmt-popup-wrap">
+                  <button className="fmt-btn" title="Font color"
+                    onMouseDown={adv ? e => e.preventDefault() : undefined}
+                    onClick={() => { setFmtColorOpen(o=>!o); setFmtTableOpen(false); }}>
+                    <span style={{display:"inline-block",width:12,height:12,borderRadius:"50%",background:"linear-gradient(135deg,#ef4444,#3b82f6,#22c55e)",border:"1.5px solid rgba(255,255,255,0.3)"}}/>A▾
+                  </button>
+                  {fmtColorOpen && (
+                    <div className="fmt-popup" style={{minWidth:220}}>
+                      <div className="fmt-popup-title">Font Color</div>
+                      <div className="fmt-color-grid">
+                        {FONT_COLORS.map(({c,n}) => (
+                          <div key={c} className="fmt-color-swatch" style={{background:c}} title={n}
+                            onMouseDown={adv ? e => doColor(e,c) : undefined}
+                            onClick={!adv ? () => insertColor(c) : undefined} />
+                        ))}
+                      </div>
+                      <div style={{marginTop:10,display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{fontSize:11,color:"var(--t2)"}}>Custom:</span>
+                        <input type="color" defaultValue="#ffffff"
+                          style={{width:28,height:22,border:"none",background:"none",cursor:"pointer",padding:0}}
+                          onChange={e => adv ? document.execCommand('foreColor',false,e.target.value) : insertColor(e.target.value)} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="fmt-sep"/>
+                {/* Headings */}
+                {[["H1","h1","# ",13],["H2","h2","## ",12],["H3","h3","### ",11]].map(([lbl,tag,pfx,fs]) => (
+                  <button key={lbl} className="fmt-btn" title={lbl} style={{fontSize:fs}}
+                    onMouseDown={adv ? e => cmd(e,'formatBlock',tag) : undefined}
+                    onClick={!adv ? () => insertLine(pfx) : undefined}>{lbl}</button>
+                ))}
+
+                <div className="fmt-sep"/>
+                {/* Lists & Quote */}
+                <button className="fmt-btn" title="Bullet list"
+                  onMouseDown={adv ? e => cmd(e,'insertUnorderedList') : undefined}
+                  onClick={!adv ? () => insertLine("- ") : undefined}>• List</button>
+                <button className="fmt-btn" title="Numbered list"
+                  onMouseDown={adv ? e => cmd(e,'insertOrderedList') : undefined}
+                  onClick={!adv ? () => insertLine("1. ") : undefined}>1. List</button>
+                <button className="fmt-btn" title="Blockquote"
+                  onMouseDown={adv ? e => cmd(e,'formatBlock','blockquote') : undefined}
+                  onClick={!adv ? () => insertLine("> ") : undefined}>❝ Quote</button>
+
+                <div className="fmt-sep"/>
+                {/* Code */}
+                <button className="fmt-btn" title="Inline code" style={{fontFamily:"var(--mono)"}}
+                  onMouseDown={adv ? e => ins(e,`<code style="font-family:monospace;background:#1d2030;color:#22d3ee;padding:2px 6px;border-radius:4px">${getSel()||'code'}</code>`) : undefined}
+                  onClick={!adv ? () => insertFormat("`","`","code") : undefined}>{"<>"} Code</button>
+                <button className="fmt-btn" title="Code block" style={{fontFamily:"var(--mono)"}}
+                  onMouseDown={adv ? e => ins(e,`<pre style="background:#1d2030;border-radius:8px;padding:14px;overflow:auto"><code style="color:#34d399;font-family:monospace">${getSel()||'code block'}</code></pre>`) : undefined}
+                  onClick={!adv ? () => insertFormat("```\n","\n```","code block") : undefined}>{"```"} Block</button>
+
+                <div className="fmt-sep"/>
+                {/* Table */}
+                <div className="fmt-popup-wrap">
+                  <button className="fmt-btn" title="Insert table"
+                    onMouseDown={adv ? e => e.preventDefault() : undefined}
+                    onClick={() => { setFmtTableOpen(o=>!o); setFmtColorOpen(false); }}>⊞ Table ▾</button>
+                  {fmtTableOpen && (
+                    <div className="fmt-popup" style={{minWidth:230}}>
+                      <div className="fmt-popup-title">Table Width</div>
+                      <div className="fmt-table-opts">
+                        {[{label:"25%",w:"25%",bar:25},{label:"50%",w:"50%",bar:50},{label:"75%",w:"75%",bar:75},{label:"100%",w:"100%",bar:100},{label:"Auto",w:"auto",bar:40}].map(({label,w,bar}) => (
+                          <div key={w} className="fmt-table-opt"
+                            onMouseDown={adv ? e => doTable(e,w,3,2) : undefined}
+                            onClick={!adv ? () => insertHtmlTable(w,3,2) : undefined}>
+                            <span>{label}</span><div className="fmt-table-bar" style={{width:bar*0.6}}/>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{marginTop:8,borderTop:"1px solid var(--border)",paddingTop:8}}>
+                        <div className="fmt-popup-title">Columns × Rows</div>
+                        <div style={{display:"flex",gap:6}}>
+                          {[[2,2],[3,2],[4,3],[5,3]].map(([c,r]) => (
+                            <button key={`${c}x${r}`} className="fmt-btn" style={{fontSize:11,padding:"3px 7px",border:"1px solid var(--border)"}}
+                              onMouseDown={adv ? e => doTable(e,"100%",c,r) : undefined}
+                              onClick={!adv ? () => insertHtmlTable("100%",c,r) : undefined}>{c}×{r}</button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Line */}
+                <button className="fmt-btn" title="Horizontal line"
+                  onMouseDown={adv ? e => ins(e,'<hr style="border:none;border-top:1px solid #3d4060;margin:14px 0">') : undefined}
+                  onClick={!adv ? () => insertLine("---") : undefined}>― Line</button>
+              </div>
+            );
+          })()}
+
+          {/* Content area */}
           {preview ? (
-            renderPreview()
+            advancedEdit ? (
+              <div style={{ position: "relative" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, padding:"7px 12px", background:"rgba(124,106,247,0.1)", border:"1px solid rgba(124,106,247,0.3)", borderRadius:8 }}>
+                  <Icon d={ic.sparkle} size={13} stroke="var(--accent2)" />
+                  <span style={{ fontSize:12, color:"var(--accent2)", fontWeight:600 }}>Advanced Edit — use the toolbar above or click anywhere to type</span>
+                  <span style={{ fontSize:11, color:"var(--t2)", marginLeft:"auto" }}>Save Changes in toolbar when done</span>
+                </div>
+                <div ref={advEditRef} contentEditable suppressContentEditableWarning
+                  className={contentType === "html-snippet" ? "html-snippet-preview" : "md-view"}
+                  style={{ outline:"2px solid var(--accent)", outlineOffset:3, borderRadius:8, minHeight:300,
+                    ...(contentType === "html-snippet" ? { background:"var(--bg3)", padding:16 } : {}) }} />
+              </div>
+            ) : renderPreview()
           ) : (
-            <textarea className="note-textarea" value={content} placeholder={"Start writing…\n\nMarkdown supported:\n# Heading  **bold**  `code`\n- Bullet list\n> Blockquote\n\nPaste full HTML — it will render automatically in preview!"}
+            <textarea ref={textareaRef} className="note-textarea" value={content}
+              placeholder={"Start writing…\n\nUse the toolbar above to format, or type Markdown:\n# Heading  **bold**  `code`\n- Bullet list  > Blockquote"}
               onChange={e => { setContent(e.target.value); sched(title, e.target.value, tags, pinned, archived, color); }} />
           )}
         </div>
@@ -1067,7 +1817,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
-function Dashboard({ notes, tree, onOpenNote }) {
+function Dashboard({ notes, tree, onOpenNote, onFolderClick }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setTimeout(() => setMounted(true), 100); }, []);
   const total = Object.keys(notes).length;
@@ -1100,7 +1850,7 @@ function Dashboard({ notes, tree, onOpenNote }) {
         ))}
       </div>
       <div className="sec-title">Knowledge Graph</div>
-      <div className="graph-box"><KnowledgeGraph tree={tree} /></div>
+      <div className="graph-box"><KnowledgeGraph tree={tree} notes={notes} onFolderClick={onFolderClick} /></div>
       {pinnedNotes.length > 0 && <>
         <div className="sec-title">Pinned</div>
         <div className="notes-grid" style={{ marginBottom: 26 }}>
@@ -1518,7 +2268,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [activeNav, setActiveNav] = useState("dashboard");
   const [sideCollapsed, setSideCollapsed] = useState(false);
-  const [rightOpen, setRightOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(false);
   const [openNote, setOpenNote] = useState(null);
   const [mobileNoteFocus, setMobileNoteFocus] = useState(false);
   const [selId, setSelId] = useState(null);
@@ -1834,7 +2584,7 @@ function App() {
   const renderMain = () => {
     if (!notes || !tree) return null;
     switch (activeNav) {
-      case "dashboard": return <Dashboard notes={notes} tree={tree} onOpenNote={openNote_} />;
+      case "dashboard": return <Dashboard notes={notes} tree={tree} onOpenNote={openNote_} onFolderClick={f => { handleFolderClick(f); setActiveNav("knowledge"); }} />;
       case "ai": return <AIAssistant notes={notes} />;
       case "search": return <GlobalSearch notes={notes} tree={tree} onOpenNote={openNote_} />;
       case "favorites": return <Favorites notes={notes} onOpenNote={openNote_} />;
