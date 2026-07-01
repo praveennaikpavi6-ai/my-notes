@@ -1404,22 +1404,56 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   // Reset advanced edit when note changes
   useEffect(() => { setAdvancedEdit(false); }, [noteId]);
 
+  // Convert contenteditable HTML back to Markdown (keeps note as markdown type)
+  const htmlToMD = (html) => {
+    const d = document.createElement('div');
+    d.innerHTML = html;
+    const proc = (node) => {
+      if (node.nodeType === 3) return node.textContent;
+      if (node.nodeType !== 1) return '';
+      const tag = node.tagName;
+      const inner = Array.from(node.childNodes).map(proc).join('');
+      switch(tag) {
+        case 'H1': return `# ${inner.trim()}\n\n`;
+        case 'H2': return `## ${inner.trim()}\n\n`;
+        case 'H3': return `### ${inner.trim()}\n\n`;
+        case 'STRONG': case 'B': return `**${inner}**`;
+        case 'EM': case 'I': return `*${inner}*`;
+        case 'S': case 'STRIKE': return `~~${inner}~~`;
+        case 'CODE': return node.closest('pre') ? inner : `\`${inner}\``;
+        case 'PRE': return `\`\`\`\n${node.textContent.trim()}\n\`\`\`\n\n`;
+        case 'BLOCKQUOTE': return `> ${inner.trim()}\n\n`;
+        case 'LI': return `- ${inner.trim()}\n`;
+        case 'UL': case 'OL': return `${inner}\n`;
+        case 'BR': return '\n';
+        case 'P': case 'DIV': return inner.trim() ? `${inner.trim()}\n\n` : '';
+        case 'TABLE': {
+          const rows = Array.from(node.querySelectorAll('tr'));
+          if (!rows.length) return inner;
+          const toMdRow = (tr) => '| ' + Array.from(tr.querySelectorAll('th,td')).map(c => c.textContent.trim()).join(' | ') + ' |';
+          const header = toMdRow(rows[0]);
+          const sep = '| ' + Array.from(rows[0].querySelectorAll('th,td')).map(() => '---').join(' | ') + ' |';
+          const body = rows.slice(1).map(toMdRow).join('\n');
+          return `${header}\n${sep}${body ? '\n' + body : ''}\n\n`;
+        }
+        case 'A': return `[${inner}](${node.getAttribute('href') || ''})`;
+        case 'HR': return '---\n\n';
+        default: return inner;
+      }
+    };
+    return Array.from(d.childNodes).map(proc).join('').replace(/\n{3,}/g, '\n\n').trim();
+  };
+
   const saveAdvancedEdit = () => {
     if (!advEditRef.current) return;
-    // Clean up browser-generated div/br wrapping before saving
-    const tmp = document.createElement('div');
-    tmp.innerHTML = advEditRef.current.innerHTML;
-    // Replace standalone <div> wrappers with <p>
-    tmp.querySelectorAll('div').forEach(d => {
-      if (!d.closest('table') && !d.querySelector('table')) {
-        const p = document.createElement('p');
-        p.innerHTML = d.innerHTML;
-        d.replaceWith(p);
-      }
-    });
-    // Remove trailing empty <p> and <br> at end
-    tmp.querySelectorAll('p').forEach(p => { if (!p.textContent.trim() && !p.querySelector('img,br')) p.remove(); });
-    const newContent = tmp.innerHTML;
+    let newContent;
+    if (contentType === 'markdown') {
+      // Convert HTML back to markdown — note stays as markdown type, rendering unchanged
+      newContent = htmlToMD(advEditRef.current.innerHTML);
+    } else {
+      // For HTML notes, save HTML directly
+      newContent = advEditRef.current.innerHTML;
+    }
     setContent(newContent);
     sched(title, newContent, tags, pinned, archived, color);
     setAdvancedEdit(false);
