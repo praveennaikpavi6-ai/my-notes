@@ -2212,14 +2212,30 @@ function NoteAttachments({ noteId, attachments, onUpdate }) {
     setError(null);
     const oversized = [...files].find(f => f.size > MAX_FILE_MB * 1024 * 1024);
     if (oversized) { setError(`"${oversized.name}" exceeds ${MAX_FILE_MB} MB`); return; }
+
     const newList = [...list];
     for (const file of [...files]) {
-      setProgress(p => ({ ...p, [file.name]: 5 }));
+      setProgress(p => ({ ...p, [file.name]: 0 }));
       try {
-        const tick = setInterval(() => setProgress(p => ({ ...p, [file.name]: Math.min((p[file.name] || 5) + 12, 85) })), 250);
-        const result = await firebaseFileStore.upload(noteId, file);
-        clearInterval(tick);
-        setProgress(p => ({ ...p, [file.name]: 100 }));
+        const result = await new Promise((resolve, reject) => {
+          const safeName = file.name.replace(/[^\w.\-() ]+/g, "_");
+          const path = `attachments/${noteId}/${Date.now()}-${safeName}`;
+          const storage = firebase.storage(firebase.app());
+          const ref = storage.ref(path);
+          const task = ref.put(file, { contentType: file.type || "application/octet-stream" });
+
+          task.on("state_changed",
+            (snap) => {
+              const pct = Math.round((snap.bytesTransferred / snap.totalBytes) * 100);
+              setProgress(p => ({ ...p, [file.name]: pct }));
+            },
+            (err) => reject(err),
+            async () => {
+              const url = await task.snapshot.ref.getDownloadURL();
+              resolve({ id: path, name: file.name, type: file.type || "file", size: file.size, url, path, uploadedAt: new Date().toISOString() });
+            }
+          );
+        });
         newList.push(result);
       } catch (err) {
         setError(`Upload failed: ${err.message}`);
@@ -2227,7 +2243,7 @@ function NoteAttachments({ noteId, attachments, onUpdate }) {
       }
     }
     onUpdate(newList);
-    setTimeout(() => setProgress({}), 1000);
+    setTimeout(() => setProgress({}), 1200);
   };
 
   const handleRemove = async (att) => {
