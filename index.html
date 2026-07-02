@@ -2223,13 +2223,15 @@ function NoteAttachments({ noteId, attachments, onUpdate }) {
         setProgress(p => ({ ...p, [file.name]: Math.round(fakePct) }));
       }, 300);
       try {
+        console.log("[v0] starting upload for", file.name, "to note", noteId);
         const result = await firebaseFileStore.upload(noteId, file);
+        console.log("[v0] upload done:", result.url);
         clearInterval(ticker);
         setProgress(p => ({ ...p, [file.name]: 100 }));
         newList.push(result);
       } catch (err) {
         clearInterval(ticker);
-        console.log("[v0] upload error:", err.message);
+        console.error("[v0] upload error:", err.code, err.message);
         setError(`Upload failed: ${err.message}`);
         setProgress(p => { const n = { ...p }; delete n[file.name]; return n; });
       }
