@@ -792,7 +792,7 @@ function ContextMenu({ x, y, items, onClose }) {
   );
 }
 
-// ── Drag ghost overlay ────────────────────────────────────────────────────────
+// ── Drag ghost overlay ───────���────────────────────────────────────────────────
 // Uses mouse events instead of HTML5 drag API (which is blocked in iframes)
 const dragState = { id: null, label: null };
 
@@ -2215,45 +2215,27 @@ function NoteAttachments({ noteId, attachments, onUpdate }) {
 
     const newList = [...list];
     for (const file of [...files]) {
-      setProgress(p => ({ ...p, [file.name]: 1 }));
+      setProgress(p => ({ ...p, [file.name]: 10 }));
+      // Animate progress while the actual upload runs
+      let fakePct = 10;
+      const ticker = setInterval(() => {
+        fakePct = Math.min(fakePct + Math.random() * 8, 90);
+        setProgress(p => ({ ...p, [file.name]: Math.round(fakePct) }));
+      }, 300);
       try {
-        // Use the already-initialised storage from firebaseFileStore's closure
-        const safeName = file.name.replace(/[^\w.\-() ]+/g, "_");
-        const path = `attachments/${noteId}/${Date.now()}-${safeName}`;
-        const storageRef = firebase.storage(firebaseApp).ref(path);
-        const task = storageRef.put(file, { contentType: file.type || "application/octet-stream" });
-
-        const result = await new Promise((resolve, reject) => {
-          task.on(
-            "state_changed",
-            (snap) => {
-              const pct = snap.totalBytes > 0
-                ? Math.round((snap.bytesTransferred / snap.totalBytes) * 100)
-                : 0;
-              setProgress(p => ({ ...p, [file.name]: pct }));
-            },
-            (err) => reject(err),
-            () => {
-              task.snapshot.ref.getDownloadURL().then((url) => {
-                resolve({
-                  id: path, name: file.name,
-                  type: file.type || "application/octet-stream",
-                  size: file.size, url, path,
-                  uploadedAt: new Date().toISOString()
-                });
-              }).catch(reject);
-            }
-          );
-        });
-
+        const result = await firebaseFileStore.upload(noteId, file);
+        clearInterval(ticker);
+        setProgress(p => ({ ...p, [file.name]: 100 }));
         newList.push(result);
       } catch (err) {
+        clearInterval(ticker);
+        console.log("[v0] upload error:", err.message);
         setError(`Upload failed: ${err.message}`);
         setProgress(p => { const n = { ...p }; delete n[file.name]; return n; });
       }
     }
     onUpdate(newList);
-    setTimeout(() => setProgress({}), 1200);
+    setTimeout(() => setProgress({}), 1000);
   };
 
   const handleRemove = async (att) => {
