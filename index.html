@@ -384,8 +384,8 @@ const CSS = `
 :root {
   /* ── Dark palette — deep ink with vivid indigo accent ── */
   --bg0: #07080d; --bg1: #0d0e16; --bg2: #111320; --bg3: #181b2e; --bg4: #1f2238;
-  --border: rgba(255,255,255,0.09); --border-hi: rgba(255,255,255,0.16);
-  --t0: #f2f3ff; --t1: #b6bcdd; --t2: #8a90b2;
+  --border: rgba(255,255,255,0.11); --border-hi: rgba(255,255,255,0.2);
+  --t0: #f5f6ff; --t1: #ccd2ee; --t2: #a4abce;
   --accent: #6c63ff; --accent2: #9b93ff; --glow: rgba(108,99,255,0.28);
   --teal: #2dd4bf; --rose: #fb7185; --amber: #fbbf24; --emerald: #4ade80; --orange: #fb923c;
   --glass: rgba(255,255,255,0.03); --glass-hi: rgba(255,255,255,0.07);
@@ -713,7 +713,22 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
 .tbl-editor-head { width: 100%; padding: 7px 10px; background: rgba(124,106,247,0.15); border: 1px solid var(--accent); border-radius: 5px; color: var(--t0); font-size: 13px; font-weight: 700; font-family: var(--font); outline: none; box-sizing: border-box; }
 .tbl-editor-head:focus { background: rgba(124,106,247,0.25); }
 
-.mobile-focus-btn, .mobile-focus-sep { display: none; }
+.mobile-focus-btn, .mobile-focus-sep { display: flex; }
+
+/* ── Full screen (focus) reading mode — all screen sizes ── */
+.app.note-focus .sidebar,
+.app.note-focus .explorer,
+.app.note-focus .exp-resizer,
+.app.note-focus .exp-reopen,
+.app.note-focus .rpanel { display: none; }
+.app.note-focus .main { width: 100%; min-width: 100%; }
+.app.note-focus .content { padding-left: max(52px, calc((100% - 880px) / 2)); padding-right: max(52px, calc((100% - 880px) / 2)); }
+
+/* ── Explorer resize handle & reopen strip ── */
+.exp-resizer { width: 5px; flex-shrink: 0; cursor: col-resize; background: transparent; z-index: 21; transition: background var(--tr); }
+.exp-resizer:hover, .exp-resizer.active { background: rgba(108,99,255,0.5); }
+.exp-reopen { width: 22px; flex-shrink: 0; border: none; border-right: 1px solid var(--border); background: var(--bg1); color: var(--t2); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all var(--tr); }
+.exp-reopen:hover { color: var(--t0); background: var(--glass-hi); }
 .md-view img, .html-snippet-preview img { max-width: 100%; height: auto; }
 .md-view table, .html-snippet-preview table { max-width: 100%; }
 .html-snippet-preview { overflow-x: auto; }
@@ -724,7 +739,8 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
   .sidebar { width: 56px; min-width: 56px; }
   .sidebar .nav-label, .sidebar .slogo-text { opacity: 0; width: 0; }
   .sidebar .slogo { padding: 12px 13px; }
-  .explorer { width: calc(100vw - 56px); min-width: calc(100vw - 56px); }
+  .explorer { width: calc(100vw - 56px) !important; min-width: calc(100vw - 56px) !important; }
+  .exp-resizer, .exp-reopen { display: none; }
   .main { display: none; min-width: 100vw; }
   .rpanel, .rpanel.hidden { display: none; }
   .app.note-focus .sidebar,
@@ -1485,7 +1501,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   })();
 
   // ── Render preview based on content type ─────────────────────────────────
-  // ── Advanced Edit (contenteditable preview) ─────��─────────────────────────
+  // ── Advanced Edit (contenteditable preview) ───���─��─────────────────────────
   const [advancedEdit, setAdvancedEdit] = useState(false);
   const advEditRef = useRef(null);
 
@@ -2891,6 +2907,43 @@ function App() {
   const [syncStatus, setSyncStatus] = useState("idle");
   const isInitialLoad = useRef(true); // prevent saving seeds to Drive on first load
 
+  // ── Explorer width (resizable) + hide toggle ────────────────────────────────
+  const isMobile = () => window.innerWidth <= 760;
+  const [expWidth, setExpWidth] = useState(() => {
+    try { return Math.min(440, Math.max(170, parseInt(localStorage.getItem("kos_exp_width")) || 252)); } catch { return 252; }
+  });
+  const [expHidden, setExpHidden] = useState(false);
+  const [expResizing, setExpResizing] = useState(false);
+  const startExpResize = (e) => {
+    e.preventDefault();
+    const startX = e.clientX, startW = expWidth;
+    setExpResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    let latest = startW;
+    const onMove = ev => {
+      latest = Math.min(440, Math.max(170, startW + (ev.clientX - startX)));
+      setExpWidth(latest);
+    };
+    const onUp = () => {
+      setExpResizing(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try { localStorage.setItem("kos_exp_width", String(latest)); } catch {}
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // Escape exits full screen reading mode
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") setMobileNoteFocus(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // ── Theme (light / dark) ─────────���──────────────────────────────────────────
   const [theme, setTheme] = useState(() => {
     try { return localStorage.getItem("kos_theme") || "dark"; } catch { return "dark"; }
@@ -3048,7 +3101,7 @@ function App() {
   const createNote = (id, folderId, data) => {
     setNotes(p => ({ ...p, [id]: data }));
     setTree(t => addToFolder(t, folderId, { id, label: data.title, type: "note", tags: data.tags || [] }));
-    setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(true);
+    setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile());
     showToast("Note created", ic.check);
   };
 
@@ -3187,7 +3240,7 @@ function App() {
     });
   };
 
-  const openNote_ = id => { setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(true); };
+  const openNote_ = id => { setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile()); };
 
   const showExplorer = ["knowledge", "recent", "favorites", "dashboard"].includes(activeNav);
 
@@ -3257,7 +3310,7 @@ function App() {
                     const note = notes[n.id];
                     if (!note) return null;
                     return (
-                      <div key={n.id} className="note-card" onClick={() => { setOpenNote(n.id); setSelId(n.id); setMobileNoteFocus(true); }}
+                      <div key={n.id} className="note-card" onClick={() => { setOpenNote(n.id); setSelId(n.id); setMobileNoteFocus(isMobile()); }}
                         style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
                         <div className="nc-title">{note.pinned && <Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />}{note.title}</div>
                         <div className="nc-preview">{plainText(note.content)}</div>
@@ -3373,12 +3426,16 @@ function App() {
         </div>
 
         {/* Explorer */}
-        <div className={`explorer${showExplorer ? "" : " hidden"}`}>
+        <div className={`explorer${showExplorer && !expHidden ? "" : " hidden"}`}
+          style={showExplorer && !expHidden ? { width: expWidth, minWidth: expWidth } : undefined}>
           <div className="exp-header">
             <div className="exp-title">Explorer</div>
             <div className="exp-actions">
               <button className="ibtn" onClick={() => setShowNewNote(true)} title="New note"><Icon d={ic.plus} size={15} /></button>
               <button className="ibtn" onClick={() => setShowNewFolder(true)} title="New folder"><Icon d={ic.folderPlus} size={15} /></button>
+              <button className="ibtn" onClick={() => setExpHidden(true)} title="Hide explorer">
+                <span style={{ display: "flex", transform: "rotate(180deg)" }}><Icon d={ic.chevronRight} size={15} /></span>
+              </button>
             </div>
           </div>
           {/* Tag filter bar */}
@@ -3408,7 +3465,7 @@ function App() {
                 ) : tagged.map(([id, note]) => (
                   <div key={id}
                     className={`tree-row${selId === id ? " sel" : ""}`}
-                    onClick={() => { setSelId(id); setFolderView(null); setOpenNote(id); setActiveNav("knowledge"); setMobileNoteFocus(true); }}>
+                    onClick={() => { setSelId(id); setFolderView(null); setOpenNote(id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile()); }}>
                     <Icon d={ic.file} size={13} stroke="var(--teal)" style={{ flexShrink: 0 }} />
                     <span className="tree-lbl">{note.title || "Untitled"}</span>
                     {note.pinned && <Icon d={ic.pin} size={10} fill="var(--rose)" stroke="var(--rose)" />}
@@ -3421,7 +3478,7 @@ function App() {
                   onSelect={n => {
                     if (n._pin) { updateNote(n.id, { pinned: !notes[n.id]?.pinned }); showToast(notes[n.id]?.pinned ? "Unpinned" : "Pinned", ic.pin); return; }
                     setSelId(n.id); setFolderView(null);
-                    if (notes[n.id]) { setOpenNote(n.id); setActiveNav("knowledge"); setMobileNoteFocus(true); }
+                    if (notes[n.id]) { setOpenNote(n.id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile()); }
                   }}
                   onToggle={id => setTree(t => toggleExpand(t, id))}
                   onRename={renameItem}
@@ -3435,6 +3492,19 @@ function App() {
             )}
           </div>
         </div>
+
+        {/* Explorer resize handle / reopen strip */}
+        {showExplorer && !expHidden && (
+          <div className={`exp-resizer${expResizing ? " active" : ""}`}
+            onMouseDown={startExpResize}
+            onDoubleClick={() => setExpHidden(true)}
+            title="Drag to resize · Double-click to hide" />
+        )}
+        {showExplorer && expHidden && (
+          <button className="exp-reopen" onClick={() => setExpHidden(false)} title="Show explorer">
+            <Icon d={ic.chevronRight} size={14} />
+          </button>
+        )}
 
         {/* Main */}
         <div className="main">{renderMain()}</div>
