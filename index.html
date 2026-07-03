@@ -161,6 +161,14 @@ const localCache = {
   async set(key, val) { IS_CLAUDE ? claudeStorage.set(key, val) : localStore.set(key, val); }
 };
 
+// ── Utilities ─────────────────────────────────────────────────────────────────
+// Strip HTML tags + markdown symbols to get a clean plain-text preview
+const plainText = (raw = "") => {
+  const noHtml = raw.replace(/<[^>]+>/g, " ");
+  const noMd   = noHtml.replace(/[#*`_~\[\]>\\]/g, "");
+  return noMd.replace(/\s+/g, " ").trim();
+};
+
 // ── Icons ─────────────────────────────────────────────────────────────────────
 const Icon = ({ d, size = 18, stroke = "currentColor", fill = "none", strokeWidth = 1.8 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={stroke} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
@@ -369,7 +377,7 @@ function renderMD(md) {
   return h;
 }
 
-// ── CSS ───────────────────────────────────────────────────────────────────────
+// ── CSS ───────────────────────────────────────────────────────────────���───────
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800&family=JetBrains+Mono:wght@400;500&display=swap');
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2378,7 +2386,7 @@ function Dashboard({ notes, tree, onOpenNote, onFolderClick }) {
           {pinnedNotes.map(([id, note]) => (
             <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderColor: "rgba(244,114,182,0.3)", borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
               <div className="nc-title"><Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />{note.title}</div>
-              <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
+              <div className="nc-preview">{plainText(note.content)}</div>
               <div className="nc-footer"><div className="nc-date">{note.updated}</div><div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-purple">{t}</span>)}</div></div>
             </div>
           ))}
@@ -2389,7 +2397,7 @@ function Dashboard({ notes, tree, onOpenNote, onFolderClick }) {
         {recent.map(([id, note]) => (
           <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
             <div className="nc-title">{note.title}</div>
-            <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
+            <div className="nc-preview">{plainText(note.content)}</div>
             <div className="nc-footer"><div className="nc-date">{note.updated}</div><div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div></div>
           </div>
         ))}
@@ -2620,7 +2628,7 @@ function Favorites({ notes, onOpenNote }) {
           {pinned.map(([id, note]) => (
             <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderLeft: note.color ? `3px solid ${note.color}` : "3px solid var(--rose)" }}>
               <div className="nc-title"><Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />{note.title}</div>
-              <div className="nc-preview">{(note.content || "").replace(/[#*`>~\[\]]/g, "").trim()}</div>
+              <div className="nc-preview">{plainText(note.content)}</div>
               <div className="nc-footer">
                 <div className="nc-date">{note.updated}</div>
                 {(note.tags || []).length > 0 && <div style={{ display:"flex", gap:3 }}>{note.tags.slice(0,2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div>}
@@ -2644,7 +2652,7 @@ function Recent({ notes, onOpenNote }) {
         {sorted.map(([id, note]) => (
           <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
             <div className="nc-title">{note.pinned && <Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />}{note.title}</div>
-            <div className="nc-preview">{(note.content || "").replace(/[#*`>~\[\]]/g, "").trim()}</div>
+            <div className="nc-preview">{plainText(note.content)}</div>
             <div className="nc-footer">
               <div className="nc-date">{note.updated}</div>
               <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
@@ -3252,7 +3260,7 @@ function App() {
                       <div key={n.id} className="note-card" onClick={() => { setOpenNote(n.id); setSelId(n.id); setMobileNoteFocus(true); }}
                         style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
                         <div className="nc-title">{note.pinned && <Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />}{note.title}</div>
-                        <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
+                        <div className="nc-preview">{plainText(note.content)}</div>
                         <div className="nc-footer">
                           <div className="nc-date">{note.updated}</div>
                           <div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div>
