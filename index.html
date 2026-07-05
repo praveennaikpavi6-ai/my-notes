@@ -8,32 +8,11 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-storage-compat.js"></script>
-<link rel="manifest" href="manifest.json">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="KnowledgeOS">
-<meta name="theme-color" content="#0a0b0f">
-<link rel="apple-touch-icon" href="icon-512.png">
-<link rel="icon" type="image/png" href="icon-512.png">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script>
-  // Apply saved theme before React mounts to avoid a flash of the wrong theme
-  (function () {
-    try {
-      var t = localStorage.getItem("kos_theme") || "dark";
-      document.documentElement.setAttribute("data-theme", t);
-      document.documentElement.style.background = t === "light" ? "#f4f4f7" : "#0a0b0f";
-    } catch (e) {
-      document.documentElement.setAttribute("data-theme", "dark");
-    }
-  })();
-</script>
 </head>
-<body style="margin:0;padding:0">
+<body style="margin:0;padding:0;background:#0a0b0f">
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useRef, useEffect, useCallback } = React;
@@ -59,57 +38,37 @@ const firebaseConfig = {
 };
 
 const firebaseApp = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
-
-// ── Firebase Auth — persistent session (survives refresh, works across devices) ─
-const firebaseAuth = firebase.auth(firebaseApp);
-// LOCAL persistence = session lives in IndexedDB, survives browser close, page refresh.
-// User only needs to log in once per device — never asked again until they sign out.
-firebaseAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-
-// ── Auth helpers ───────────────────────────────────────────────────────────────
-const authApi = {
-  signIn: (email, password) => firebaseAuth.signInWithEmailAndPassword(email, password),
-  signOut: () => firebaseAuth.signOut(),
-  onAuthChange: (cb) => firebaseAuth.onAuthStateChanged(cb),
-  currentUser: () => firebaseAuth.currentUser,
-};
-
-// Attachment store — reads file as base64, saves inside the note's Firestore document.
-// No Firebase Storage, no CORS, no extra cost. Limit: ~750 KB per file.
-const firebaseFileStore = {
-  async upload(noteId, file) {
-    const MAX_BYTES = 750 * 1024;
-    if (file.size > MAX_BYTES) {
-      throw new Error(`File exceeds 750 KB limit (${(file.size / 1024).toFixed(0)} KB). Please compress or use a smaller file.`);
-    }
-    const base64 = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result); // data:<type>;base64,<data>
-      reader.onerror = () => reject(new Error("Could not read file"));
-      reader.readAsDataURL(file);
-    });
+const firebaseFileStore = (() => {
+  try {
+    const storage = firebase.storage(firebaseApp);
     return {
-      id: `${Date.now()}-${file.name}`,
-      name: file.name,
-      type: file.type || "application/octet-stream",
-      size: file.size,
-      url: base64,   // base64 data URL — works as href and src directly
-      uploadedAt: new Date().toISOString()
+      async upload(noteId, file) {
+        const safeName = file.name.replace(/[^\w.\-() ]+/g, "_");
+        const path = `attachments/${noteId}/${Date.now()}-${safeName}`;
+        const ref = storage.ref(path);
+        const snap = await ref.put(file, { contentType: file.type || "application/octet-stream" });
+        const url = await snap.ref.getDownloadURL();
+        return { id: path, name: file.name, type: file.type || "file", size: file.size, url, path, uploadedAt: new Date().toISOString() };
+      },
+      async remove(path) {
+        if (!path) return;
+        await storage.ref(path).delete();
+      }
     };
-  },
-  async remove() {} // no-op: attachment is removed from the notes array via onUpdate
-};
+  } catch (e) {
+    console.warn("Firebase Storage init failed:", e);
+    return {
+      async upload() { throw new Error("Firebase Storage is not available"); },
+      async remove() {}
+    };
+  }
+})();
 
 const firestoreStore = (() => {
   try {
     const db = firebase.firestore(firebaseApp);
     db.settings({ ignoreUndefinedProperties: true });
-    // Each user's notes are stored under their UID — no other user can access them.
-    const getRef = () => {
-      const uid = authApi.currentUser()?.uid;
-      if (!uid) throw new Error("Not authenticated");
-      return db.collection("knowledgeOS").doc(uid);
-    };
+    const stateRef = db.collection("knowledgeOS").doc("state");
     const withTimeout = (promise, ms = 6000) => Promise.race([
       promise,
       new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore request timed out")), ms))
@@ -127,13 +86,13 @@ const firestoreStore = (() => {
     };
     return {
       async load() {
-        const snap = await withTimeout(getRef().get());
+        const snap = await withTimeout(stateRef.get());
         const data = snap.exists ? snap.data() : null;
         return data?.tree && data?.notes ? { tree: data.tree, notes: data.notes } : null;
       },
       async save(data) {
         const cleanData = stripUndefined(data);
-        await getRef().set({
+        await stateRef.set({
           tree: cleanData.tree,
           notes: cleanData.notes,
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -180,14 +139,6 @@ const localStore = {
 const localCache = {
   async load(key) { return IS_CLAUDE ? claudeStorage.load(key) : localStore.load(key); },
   async set(key, val) { IS_CLAUDE ? claudeStorage.set(key, val) : localStore.set(key, val); }
-};
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
-// Strip HTML tags + markdown symbols to get a clean plain-text preview
-const plainText = (raw = "") => {
-  const noHtml = raw.replace(/<[^>]+>/g, " ");
-  const noMd   = noHtml.replace(/[#*`_~\[\]>\\]/g, "");
-  return noMd.replace(/\s+/g, " ").trim();
 };
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -238,12 +189,6 @@ const ic = {
   download: "M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3",
   undo: "M9 14l-4-4 4-4M5 10h11a4 4 0 010 8h-1",
   redo: "M15 14l4-4-4-4M19 10H8a4 4 0 000 8h1",
-  sun: ["M12 17a5 5 0 100-10 5 5 0 000 10z","M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"],
-  moon: "M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z",
-  paperclip: "M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48",
-  externalLink: "M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3",
-  filePdf: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM9 13h6M9 17h4",
-  upload: "M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12",
 };
 
 // ── Seed data ─────────────────────────────────────────────────────────────────
@@ -378,10 +323,6 @@ function renderMD(md) {
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/^\> (.+)$/gm, "<blockquote>$1</blockquote>")
-    .replace(/^- \[([ xX])\] (.+)$/gm, (_, mark, txt) => {
-      const done = mark.toLowerCase() === "x";
-      return `<li class="task${done ? " done" : ""}"><span class="task-check" role="checkbox" aria-checked="${done}"></span><span class="task-txt">${txt}</span></li>`;
-    })
     .replace(/^\- (.+)$/gm, "<li>$1</li>")
     .replace(/^(\d+)\. (.+)$/gm, "<li>$2</li>")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
@@ -398,172 +339,186 @@ function renderMD(md) {
   return h;
 }
 
-// ── CSS ───────────────────────────────────────────────────────────────���───────
+// ── Word annotation wrapper ───────────────────────────────────────────────────
+function wrapAnnotations(html, annotations) {
+  if (!annotations || !Object.keys(annotations).length) return html;
+  const d = document.createElement('div');
+  d.innerHTML = html;
+  const entries = Object.entries(annotations);
+  const walk = (node) => {
+    if (node.nodeType === 3) {
+      let text = node.textContent;
+      let changed = false;
+      for (const [word, note] of entries) {
+        const re = new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+        if (re.test(text)) { changed = true; break; }
+      }
+      if (!changed) return;
+      const span = document.createElement('span');
+      let result = text;
+      for (const [word, note] of entries) {
+        const re = new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+        result = result.replace(re, `<span class="word-note" data-note="${note.replace(/"/g,'&quot;')}">$1</span>`);
+      }
+      span.innerHTML = result;
+      node.replaceWith(...span.childNodes);
+    } else if (node.nodeType === 1 && !['CODE','PRE','SCRIPT','STYLE'].includes(node.tagName)) {
+      Array.from(node.childNodes).forEach(walk);
+    }
+  };
+  Array.from(d.childNodes).forEach(walk);
+  return d.innerHTML;
+}
+
+// ── CSS ───────────────────────────────────────────────────────────────────────
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
-  /* ── Dark palette — deep ink with vivid indigo accent ── */
-  --bg0: #07080d; --bg1: #0d0e16; --bg2: #111320; --bg3: #181b2e; --bg4: #1f2238;
-  --border: rgba(255,255,255,0.11); --border-hi: rgba(255,255,255,0.2);
-  --t0: #f5f6ff; --t1: #ccd2ee; --t2: #a4abce;
-  --accent: #6c63ff; --accent2: #9b93ff; --glow: rgba(108,99,255,0.28);
-  --teal: #2dd4bf; --rose: #fb7185; --amber: #fbbf24; --emerald: #4ade80; --orange: #fb923c;
-  --glass: rgba(255,255,255,0.03); --glass-hi: rgba(255,255,255,0.07);
-  --r: 14px; --rsm: 9px; --font: 'Inter',system-ui,sans-serif; --mono: 'JetBrains Mono',monospace;
-  --tr: 0.16s cubic-bezier(0.4,0,0.2,1);
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.5); --shadow-md: 0 12px 40px rgba(0,0,0,0.6);
-  --shadow-accent: 0 0 0 1px rgba(108,99,255,0.4), 0 8px 32px rgba(108,99,255,0.18);
+  --bg0: #0a0b0f; --bg1: #0f1117; --bg2: #161820; --bg3: #1d2030; --bg4: #252840;
+  --border: rgba(255,255,255,0.07); --border-hi: rgba(255,255,255,0.14);
+  --t0: #f0f2ff; --t1: #b8bdd4; --t2: #6e7491;
+  --accent: #7c6af7; --accent2: #a78bfa; --glow: rgba(124,106,247,0.25);
+  --teal: #22d3ee; --rose: #f472b6; --amber: #fbbf24; --emerald: #34d399; --orange: #fb923c;
+  --glass: rgba(255,255,255,0.04); --glass-hi: rgba(255,255,255,0.08);
+  --r: 12px; --rsm: 8px; --font: 'Inter',system-ui,sans-serif; --mono: 'JetBrains Mono',monospace;
+  --tr: 0.18s cubic-bezier(0.4,0,0.2,1);
 }
-/* ── Light theme ─────────────────────────────────────────────────────────────── */
-:root[data-theme="light"] {
-  --bg0: #f0f0f5; --bg1: #ffffff; --bg2: #fafafd; --bg3: #f2f2f8; --bg4: #e6e6f0;
-  --border: rgba(0,0,0,0.07); --border-hi: rgba(0,0,0,0.13);
-  --t0: #12121a; --t1: #3a3a50; --t2: #8888a6;
-  --accent: #5b52e8; --accent2: #4a42d0; --glow: rgba(91,82,232,0.16);
-  --teal: #0891b2; --rose: #e11d48; --amber: #d97706; --emerald: #059669; --orange: #ea580c;
-  --glass: rgba(0,0,0,0.025); --glass-hi: rgba(0,0,0,0.055);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.06); --shadow-md: 0 12px 40px rgba(0,0,0,0.1);
-  --shadow-accent: 0 0 0 1px rgba(91,82,232,0.3), 0 8px 24px rgba(91,82,232,0.12);
-}
-html, body { background: var(--bg0); }
-body { font-family: var(--font); background: var(--bg0); color: var(--t0); height: 100vh; overflow: hidden; transition: background var(--tr), color var(--tr); -webkit-font-smoothing: antialiased; }
-.sidebar, .explorer, .rpanel, .toolbar, .fmt-bar, .chat-hdr, .chat-inp-row, .content, .main { transition: background var(--tr), border-color var(--tr); }
-::-webkit-scrollbar { width: 3px; } ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 99px; }
+body { font-family: var(--font); background: var(--bg0); color: var(--t0); height: 100vh; overflow: hidden; }
+::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 99px; }
 
 /* Layout */
 .app { display: flex; height: 100vh; overflow: hidden; }
-.sidebar { width: 216px; min-width: 216px; height: 100vh; background: var(--bg1); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width var(--tr), min-width var(--tr); overflow: hidden; z-index: 20; }
-.sidebar.collapsed { width: 52px; min-width: 52px; }
-.explorer { width: 252px; min-width: 252px; height: 100vh; background: var(--bg1); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: width var(--tr), min-width var(--tr); }
+.sidebar { width: 220px; min-width: 220px; height: 100vh; background: var(--bg1); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width var(--tr), min-width var(--tr); overflow: hidden; z-index: 20; }
+.sidebar.collapsed { width: 56px; min-width: 56px; }
+.explorer { width: 260px; min-width: 260px; height: 100vh; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: width var(--tr), min-width var(--tr); }
 .explorer.hidden { width: 0; min-width: 0; }
-.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; background: var(--bg0); }
-.rpanel { width: 256px; min-width: 256px; height: 100vh; background: var(--bg1); border-left: 1px solid var(--border); overflow-y: auto; transition: width var(--tr), min-width var(--tr); }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.rpanel { width: 260px; min-width: 260px; height: 100vh; background: var(--bg2); border-left: 1px solid var(--border); overflow-y: auto; transition: width var(--tr), min-width var(--tr); }
 .rpanel.hidden { width: 0; min-width: 0; overflow: hidden; }
 
 /* Sidebar */
-.slogo { padding: 14px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.slogo-mark { width: 28px; height: 28px; background: var(--accent); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 0 16px var(--glow); }
-.slogo-text { font-size: 13.5px; font-weight: 700; color: var(--t0); white-space: nowrap; overflow: hidden; letter-spacing: -0.2px; } .slogo-text span { color: var(--accent2); }
-.owner-email { display: block; margin: 8px 10px; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--rsm); background: var(--glass); color: var(--t2); font-size: 10.5px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.snav { flex: 1; overflow-y: auto; padding: 6px 8px; }
-.nav-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--rsm); cursor: pointer; transition: all var(--tr); color: var(--t2); font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; user-select: none; }
+.slogo { padding: 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.slogo-mark { width: 30px; height: 30px; background: linear-gradient(135deg,var(--accent),var(--teal)); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.slogo-text { font-size: 14px; font-weight: 700; color: var(--t0); white-space: nowrap; overflow: hidden; } .slogo-text span { color: var(--accent2); }
+.owner-email { display: block; margin: 6px 16px 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--glass); color: var(--t2); font-size: 10px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snav { flex: 1; overflow-y: auto; padding: 8px; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--rsm); cursor: pointer; transition: all var(--tr); color: var(--t2); font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; user-select: none; }
 .nav-item:hover { background: var(--glass-hi); color: var(--t1); }
-.nav-item.active { background: rgba(108,99,255,0.13); color: var(--accent2); font-weight: 600; }
-.nav-item.active svg { stroke: var(--accent2); }
+.nav-item.active { background: rgba(124,106,247,0.15); color: var(--accent2); }
 .nav-label { overflow: hidden; }
 .sidebar.collapsed .nav-label, .sidebar.collapsed .slogo-text, .sidebar.collapsed .owner-email { opacity: 0; width: 0; margin: 0; padding: 0; border: 0; }
 .sfooter { padding: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
 .stoggle { width: 100%; display: flex; align-items: center; justify-content: center; padding: 8px; border-radius: var(--rsm); cursor: pointer; color: var(--t2); background: none; border: none; transition: all var(--tr); }
 .stoggle:hover { background: var(--glass-hi); color: var(--t0); }
-.new-note-btn { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-radius: var(--rsm); cursor: pointer; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; border: none; white-space: nowrap; overflow: hidden; transition: all var(--tr); letter-spacing: -0.1px; box-shadow: 0 2px 12px var(--glow); }
-.new-note-btn:hover { background: var(--accent2); box-shadow: 0 4px 20px var(--glow); transform: translateY(-1px); }
+.new-note-btn { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--rsm); cursor: pointer; background: rgba(124,106,247,0.12); color: var(--accent2); font-size: 13px; font-weight: 500; border: none; white-space: nowrap; overflow: hidden; transition: all var(--tr); }
+.new-note-btn:hover { background: rgba(124,106,247,0.22); }
 
 /* Explorer */
-.exp-header { padding: 11px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-.exp-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: var(--t2); }
+.exp-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+.exp-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--t2); }
 .exp-actions { display: flex; gap: 2px; }
 .ibtn { background: none; border: none; cursor: pointer; color: var(--t2); padding: 5px; border-radius: 6px; display: flex; align-items: center; transition: all var(--tr); }
 .ibtn:hover { background: var(--glass-hi); color: var(--t0); }
 .tree-wrap { flex: 1; overflow-y: auto; padding: 6px; }
-.tree-row { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-radius: 7px; cursor: pointer; font-size: 12.5px; color: var(--t1); transition: all var(--tr); user-select: none; }
+.tree-row { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--t1); transition: all var(--tr); user-select: none; }
 .tree-row:hover { background: var(--glass-hi); color: var(--t0); }
-.tree-row.sel { background: rgba(108,99,255,0.13); color: var(--accent2); font-weight: 500; }
-.tree-row.drag-over { background: rgba(108,99,255,0.2); border: 1px dashed var(--accent); }
+.tree-row.sel { background: rgba(124,106,247,0.14); color: var(--accent2); }
+.tree-row.drag-over { background: rgba(124,106,247,0.22); border: 1px dashed var(--accent); }
 .tree-row.dragging { opacity: 0.4; }
 .drag-handle { cursor: grab; color: var(--t2); padding: 0 2px; opacity: 0; transition: opacity var(--tr); display: flex; align-items: center; flex-shrink: 0; }
 .tree-row:hover .drag-handle { opacity: 1; }
 .tree-chevron { flex-shrink: 0; transition: transform var(--tr); color: var(--t2); }
 .tree-chevron.open { transform: rotate(90deg); }
 .folder-ic { color: var(--amber); flex-shrink: 0; }
-.file-ic { color: var(--accent2); flex-shrink: 0; opacity: 0.7; }
+.file-ic { color: var(--teal); flex-shrink: 0; }
 .tree-lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-pin { color: var(--rose); flex-shrink: 0; }
 .tree-children { padding-left: 14px; }
 
 /* Toolbar */
-.toolbar { display: flex; align-items: center; gap: 3px; padding: 7px 14px; border-bottom: 1px solid var(--border); background: var(--bg1); flex-shrink: 0; flex-wrap: wrap; min-height: 42px; }
-.tbtn { background: none; border: none; cursor: pointer; color: var(--t2); padding: 5px 8px; border-radius: 7px; display: flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 500; transition: all var(--tr); white-space: nowrap; font-family: var(--font); }
+.toolbar { display: flex; align-items: center; gap: 4px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg1); flex-shrink: 0; flex-wrap: wrap; min-height: 44px; }
+.tbtn { background: none; border: none; cursor: pointer; color: var(--t2); padding: 5px 8px; border-radius: 6px; display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; transition: all var(--tr); white-space: nowrap; font-family: var(--font); }
 .tbtn:hover { background: var(--glass-hi); color: var(--t0); }
-.tbtn.on { background: rgba(108,99,255,0.14); color: var(--accent2); }
+.tbtn.on { background: rgba(124,106,247,0.15); color: var(--accent2); }
 .tbtn.danger { color: var(--rose); }
-.tbtn.danger:hover { background: rgba(251,113,133,0.1); }
+.tbtn.danger:hover { background: rgba(244,114,182,0.12); }
 .tbtn.success { color: var(--emerald); }
-.tsep { width: 1px; height: 16px; background: var(--border-hi); margin: 0 2px; flex-shrink: 0; }
+.tsep { width: 1px; height: 18px; background: var(--border-hi); margin: 0 2px; flex-shrink: 0; }
 .tspace { flex: 1; }
 
 /* Content */
-.content { flex: 1; overflow-y: auto; padding: 40px 52px; }
-.note-h1 { font-size: 32px; font-weight: 800; color: var(--t0); border: none; background: none; width: 100%; outline: none; letter-spacing: -0.8px; margin-bottom: 10px; line-height: 1.18; font-family: var(--font); }
-.note-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; flex-wrap: wrap; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.content { flex: 1; overflow-y: auto; padding: 36px 48px; }
+.note-h1 { font-size: 30px; font-weight: 700; color: var(--t0); border: none; background: none; width: 100%; outline: none; letter-spacing: -0.6px; margin-bottom: 10px; line-height: 1.2; font-family: var(--font); }
+.note-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
 .meta-chip { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--t2); }
-.tag { padding: 3px 10px; border-radius: 99px; font-size: 11px; font-weight: 500; background: var(--glass-hi); color: var(--t1); cursor: pointer; border: 1px solid var(--border); transition: all var(--tr); }
-.tag:hover { border-color: var(--accent); color: var(--accent2); background: rgba(108,99,255,0.08); }
+.tag { padding: 2px 9px; border-radius: 99px; font-size: 11px; font-weight: 500; background: var(--glass-hi); color: var(--t1); cursor: pointer; border: 1px solid var(--border); transition: all var(--tr); }
+.tag:hover { border-color: var(--accent); color: var(--accent2); }
 .tag.add { border-style: dashed; }
-.note-textarea { width: 100%; min-height: 420px; background: transparent; border: none; outline: none; resize: none; color: var(--t1); font-size: 15px; line-height: 1.9; font-family: var(--font); caret-color: var(--accent2); }
-.md-view, .html-snippet-preview { min-height: 420px; line-height: 1.9; font-size: 15px; color: var(--t1); }
-.md-view h1, .html-snippet-preview h1 { font-size: 28px; font-weight: 800; color: var(--t0); margin: 24px 0 10px; letter-spacing: -0.6px; }
-.md-view h2, .html-snippet-preview h2 { font-size: 20px; font-weight: 700; color: var(--t0); margin: 20px 0 8px; letter-spacing: -0.3px; }
-.md-view h3, .html-snippet-preview h3 { font-size: 16px; font-weight: 600; color: var(--t0); margin: 16px 0 6px; }
-.md-view p, .html-snippet-preview p { margin-bottom: 14px; }
+.note-textarea { width: 100%; min-height: 420px; background: transparent; border: none; outline: none; resize: none; color: var(--t1); font-size: 15px; line-height: 1.85; font-family: var(--font); caret-color: var(--accent2); }
+.md-view, .html-snippet-preview { min-height: 420px; line-height: 1.85; font-size: 15px; color: var(--t1); }
+.md-view h1, .html-snippet-preview h1 { font-size: 26px; font-weight: 700; color: var(--t0); margin: 20px 0 10px; letter-spacing: -0.5px; }
+.md-view h2, .html-snippet-preview h2 { font-size: 20px; font-weight: 600; color: var(--t0); margin: 18px 0 8px; }
+.md-view h3, .html-snippet-preview h3 { font-size: 16px; font-weight: 600; color: var(--t0); margin: 14px 0 6px; }
+.md-view p, .html-snippet-preview p { margin-bottom: 12px; }
 .md-view strong, .html-snippet-preview strong, .md-view b, .html-snippet-preview b { color: var(--t0); font-weight: 600; }
 .md-view em, .html-snippet-preview em, .md-view i, .html-snippet-preview i { font-style: italic; color: var(--t1); }
-.md-view code, .html-snippet-preview code { font-family: var(--mono); font-size: 12.5px; background: var(--bg3); color: var(--teal); padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border); }
-.md-view pre, .html-snippet-preview pre { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--r); padding: 18px; margin: 16px 0; overflow-x: auto; }
-.md-view pre code, .html-snippet-preview pre code { background: none; color: var(--emerald); font-size: 13px; padding: 0; border: none; }
-.md-view blockquote, .html-snippet-preview blockquote { border-left: 3px solid var(--accent); padding: 10px 18px; margin: 16px 0; background: rgba(108,99,255,0.06); color: var(--t1); font-style: normal; border-radius: 0 var(--rsm) var(--rsm) 0; }
-.md-view table, .html-snippet-preview table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
-.md-view th, .html-snippet-preview th { background: var(--bg3); color: var(--t0); padding: 9px 14px; text-align: left; font-weight: 600; border: 1px solid var(--border); font-size: 12px; letter-spacing: 0.2px; }
-.md-view td, .html-snippet-preview td { padding: 8px 14px; border: 1px solid var(--border); color: var(--t1); }
-.md-view ul, .md-view ol, .html-snippet-preview ul, .html-snippet-preview ol { padding-left: 22px; margin-bottom: 14px; }
-.md-view li, .html-snippet-preview li { margin-bottom: 5px; }
-.md-view li.task { list-style: none; display: flex; align-items: flex-start; gap: 10px; margin-left: -22px; padding: 3px 0; }
-.md-view li.task .task-check { flex-shrink: 0; width: 18px; height: 18px; margin-top: 2px; border-radius: 5px; border: 1.5px solid var(--border-hi); background: var(--bg3); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all var(--tr); position: relative; }
-.md-view li.task .task-check:hover { border-color: var(--accent); background: rgba(108,99,255,0.1); }
-.md-view li.task .task-txt { cursor: pointer; transition: color var(--tr), opacity var(--tr); }
-.md-view li.task.done .task-check { background: var(--accent); border-color: var(--accent); }
-.md-view li.task.done .task-check::after { content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg) translateY(-1px); }
-.md-view li.task.done .task-txt { color: var(--t2); text-decoration: line-through; opacity: 0.6; }
-.md-view a, .html-snippet-preview a { color: var(--accent2); text-decoration: underline; text-underline-offset: 3px; }
+.md-view code, .html-snippet-preview code { font-family: var(--mono); font-size: 13px; background: var(--bg3); color: var(--teal); padding: 2px 6px; border-radius: 4px; }
+.md-view pre, .html-snippet-preview pre { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin: 14px 0; overflow-x: auto; }
+.md-view pre code, .html-snippet-preview pre code { background: none; color: var(--emerald); font-size: 13px; padding: 0; }
+.md-view blockquote, .html-snippet-preview blockquote { border-left: 3px solid var(--accent); padding: 8px 16px; margin: 14px 0; background: rgba(124,106,247,0.06); color: var(--t1); font-style: normal; }
+.md-view table, .html-snippet-preview table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+.md-view th, .html-snippet-preview th { background: var(--bg3); color: var(--t0); padding: 9px 13px; text-align: left; font-weight: 600; border: 1px solid var(--border); }
+.md-view td, .html-snippet-preview td { padding: 8px 13px; border: 1px solid var(--border); color: var(--t1); }
+.md-view ul, .md-view ol, .html-snippet-preview ul, .html-snippet-preview ol { padding-left: 22px; margin-bottom: 12px; }
+.md-view li, .html-snippet-preview li { margin-bottom: 4px; }
+.md-view a, .html-snippet-preview a { color: var(--accent2); }
+
+/* Word annotations */
+.word-note { background: rgba(251,191,36,0.22); border-bottom: 2px dotted #fbbf24; border-radius: 2px; cursor: help; display: inline; }
+.word-note-popup { position: fixed; z-index: 700; background: var(--bg2); border: 1px solid var(--border-hi); border-radius: 12px; padding: 14px; box-shadow: 0 8px 36px rgba(0,0,0,0.55); min-width: 280px; max-width: 360px; }
+.word-note-popup-title { font-size: 11px; font-weight: 600; color: var(--t2); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.word-note-popup-word { font-size: 15px; font-weight: 700; color: var(--amber); margin-bottom: 10px; }
+.word-note-popup textarea { width: 100%; background: var(--bg3); border: 1px solid var(--border-hi); border-radius: 8px; color: var(--t0); font-family: var(--font); font-size: 13px; line-height: 1.6; padding: 8px 10px; resize: vertical; min-height: 72px; outline: none; transition: border-color var(--tr); }
+.word-note-popup textarea:focus { border-color: var(--accent); }
+.word-note-popup-actions { display: flex; gap: 6px; margin-top: 10px; }
 
 /* Dashboard */
-.dash-greeting { font-size: 28px; font-weight: 800; color: var(--t0); letter-spacing: -0.6px; margin-bottom: 4px; }
-.dash-sub { font-size: 13px; color: var(--t2); margin-bottom: 32px; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(136px,1fr)); gap: 10px; margin-bottom: 32px; }
-.stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 16px; transition: all var(--tr); cursor: default; position: relative; overflow: hidden; }
-.stat-card::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, var(--glass-hi), transparent); pointer-events: none; }
-.stat-card:hover { border-color: var(--border-hi); transform: translateY(-2px); box-shadow: var(--shadow-md); }
-.stat-ic { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin-bottom: 12px; }
-.stat-ic.p { background: rgba(108,99,255,0.15); color: var(--accent2); }
-.stat-ic.t { background: rgba(45,212,191,0.12); color: var(--teal); }
-.stat-ic.r { background: rgba(251,113,133,0.12); color: var(--rose); }
+.dash-greeting { font-size: 26px; font-weight: 700; color: var(--t0); letter-spacing: -0.4px; margin-bottom: 4px; }
+.dash-sub { font-size: 13px; color: var(--t2); margin-bottom: 28px; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 12px; margin-bottom: 28px; }
+.stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; transition: all var(--tr); cursor: default; }
+.stat-card:hover { border-color: var(--border-hi); transform: translateY(-2px); }
+.stat-ic { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
+.stat-ic.p { background: rgba(124,106,247,0.15); color: var(--accent2); }
+.stat-ic.t { background: rgba(34,211,238,0.12); color: var(--teal); }
+.stat-ic.r { background: rgba(244,114,182,0.12); color: var(--rose); }
 .stat-ic.a { background: rgba(251,191,36,0.12); color: var(--amber); }
-.stat-ic.e { background: rgba(74,222,128,0.12); color: var(--emerald); }
-.stat-val { font-size: 26px; font-weight: 800; color: var(--t0); letter-spacing: -0.6px; line-height: 1; }
-.stat-lbl { font-size: 11px; color: var(--t2); font-weight: 500; margin-top: 4px; letter-spacing: 0.1px; }
-.sec-title { font-size: 11px; font-weight: 700; color: var(--t2); margin-bottom: 12px; display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 0.8px; }
+.stat-ic.e { background: rgba(52,211,153,0.12); color: var(--emerald); }
+.stat-val { font-size: 24px; font-weight: 700; color: var(--t0); letter-spacing: -0.4px; }
+.stat-lbl { font-size: 11px; color: var(--t2); font-weight: 500; margin-top: 2px; }
+.sec-title { font-size: 12px; font-weight: 600; color: var(--t1); margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
 .sec-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
-.notes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap: 10px; margin-bottom: 28px; }
-.note-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; cursor: pointer; transition: border-color var(--tr), box-shadow var(--tr), transform var(--tr); animation: cardIn .25s ease both; }
-.note-card:hover { border-color: rgba(108,99,255,0.5); transform: translateY(-2px); box-shadow: 0 4px 24px rgba(108,99,255,0.12); }
-.nc-title { font-size: 13px; font-weight: 600; color: var(--t0); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; letter-spacing: -0.1px; }
-.nc-preview { font-size: 12px; color: var(--t2); line-height: 1.65; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
-.nc-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; gap: 6px; }
+.notes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap: 12px; margin-bottom: 26px; }
+.note-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; cursor: pointer; transition: all var(--tr); }
+.note-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 4px 20px rgba(124,106,247,0.12); }
+.nc-title { font-size: 13px; font-weight: 600; color: var(--t0); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.nc-preview { font-size: 12px; color: var(--t2); line-height: 1.6; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.nc-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
 .nc-date { font-size: 10px; color: var(--t2); }
-.nc-wc { font-size: 10px; color: var(--t2); }
-.progress-bar { height: 3px; background: var(--bg4); border-radius: 99px; overflow: hidden; margin-top: 8px; }
+.progress-bar { height: 4px; background: var(--bg4); border-radius: 99px; overflow: hidden; margin-top: 6px; }
 .progress-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg,var(--accent),var(--teal)); transition: width 0.9s cubic-bezier(0.4,0,0.2,1); }
-.graph-box { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin-bottom: 28px; }
+.graph-box { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin-bottom: 26px; }
 
 /* AI Chat */
 .chat-wrap { display: flex; flex-direction: column; height: 100%; }
 .chat-hdr { padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--bg1); display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-.chat-hdr-title { font-size: 13.5px; font-weight: 600; color: var(--t0); flex: 1; letter-spacing: -0.1px; }
+.chat-hdr-title { font-size: 14px; font-weight: 600; color: var(--t0); flex: 1; }
 .chat-msgs { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .cmsg { display: flex; gap: 10px; animation: fadeUp .25s ease; }
 .cmsg.user { flex-direction: row-reverse; }
-.cavatar { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 10px; font-weight: 700; }
-.cavatar.ai { background: var(--accent); box-shadow: 0 0 10px var(--glow); }
+.cavatar { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 11px; font-weight: 700; }
+.cavatar.ai { background: linear-gradient(135deg,var(--accent),var(--teal)); }
 .cavatar.user { background: var(--bg4); color: var(--t1); }
 .cbubble { max-width: 74%; padding: 10px 14px; border-radius: var(--r); font-size: 14px; line-height: 1.7; }
 .cbubble.ai { background: var(--bg3); border: 1px solid var(--border); color: var(--t1); border-top-left-radius: 3px; }
@@ -673,29 +628,7 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
 .attachment-name { font-size: 13px; color: var(--t0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-meta { font-size: 11px; color: var(--t2); margin-top: 2px; }
 .attachment-actions { display: flex; gap: 4px; flex-shrink: 0; }
-/* Attachment popover */
-.att-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 700; background: var(--bg2); border: 1px solid var(--border-hi); border-radius: 12px; width: 320px; box-shadow: var(--shadow-md); animation: fadeUp .14s ease; overflow: hidden; }
-.att-pop-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-.att-pop-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--t1); flex: 1; }
-.att-row { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border); transition: background var(--tr); }
-.att-row:last-child { border-bottom: none; }
-.att-row:hover { background: var(--glass); }
-.att-file-icon { flex-shrink: 0; width: 28px; height: 28px; border-radius: 6px; background: var(--bg3); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
-.att-row-main { flex: 1; min-width: 0; }
-.att-row-name { font-size: 12px; font-weight: 500; color: var(--t0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.att-row-meta { font-size: 10px; color: var(--t2); margin-top: 1px; }
-.att-empty { display: flex; align-items: center; gap: 8px; padding: 16px 12px; font-size: 12px; color: var(--t2); cursor: pointer; transition: background var(--tr); }
-.att-empty:hover { background: var(--glass); }
-.att-progress-wrap { height: 3px; background: var(--bg4); border-radius: 99px; margin-top: 4px; overflow: hidden; }
-.att-progress-bar { height: 100%; background: var(--accent); border-radius: 99px; transition: width 0.25s ease; }
-/* Tag filter bar */
-.tag-filter-bar { padding: 6px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.tag-filter-scroll { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
-.tag-filter-scroll::-webkit-scrollbar { display: none; }
-.tag-chip { flex-shrink: 0; padding: 3px 9px; border-radius: 99px; font-size: 11px; font-weight: 500; background: var(--bg3); border: 1px solid var(--border); color: var(--t2); cursor: pointer; transition: all var(--tr); white-space: nowrap; font-family: var(--font); }
-.tag-chip:hover { border-color: var(--accent); color: var(--accent2); }
-.tag-chip.active { background: rgba(124,106,247,0.15); border-color: var(--accent); color: var(--accent2); }
-
+.attachment-empty { padding: 14px 12px; font-size: 12px; color: var(--t2); }
 /* Format toolbar */
 .fmt-bar { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; padding: 6px 10px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .fmt-btn { background: none; border: none; cursor: pointer; color: var(--t2); padding: 4px 7px; border-radius: 5px; font-size: 12px; font-weight: 600; font-family: var(--font); display: flex; align-items: center; gap: 3px; transition: all var(--tr); white-space: nowrap; }
@@ -712,16 +645,6 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
 .fmt-table-opt:hover { background: var(--glass-hi); color: var(--t0); }
 .fmt-table-bar { height: 6px; background: var(--accent); border-radius: 2px; opacity: 0.55; }
 
-/* Slash command menu */
-.slash-menu { position: absolute; top: 0; left: 0; z-index: 600; background: var(--bg2); border: 1px solid var(--border-hi); border-radius: 12px; padding: 6px; min-width: 280px; box-shadow: var(--shadow-md); animation: fadeUp .14s ease; }
-.slash-menu-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--t2); padding: 4px 8px 6px; }
-.slash-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer; transition: background var(--tr); }
-.slash-item:hover, .slash-item.sel { background: var(--glass-hi); }
-.slash-item.sel { background: rgba(124,106,247,0.14); }
-.slash-icon { width: 28px; height: 28px; border-radius: 6px; background: var(--bg3); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--t1); flex-shrink: 0; font-family: var(--mono); }
-.slash-label { font-size: 13px; font-weight: 600; color: var(--t0); min-width: 100px; }
-.slash-desc { font-size: 11px; color: var(--t2); }
-
 /* Clickable table cells in preview */
 .md-view td, .md-view th, .html-snippet-preview td, .html-snippet-preview th { cursor: pointer; transition: background 0.15s; }
 .md-view td:hover, .html-snippet-preview td:hover { background: rgba(124,106,247,0.12) !important; }
@@ -734,22 +657,7 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
 .tbl-editor-head { width: 100%; padding: 7px 10px; background: rgba(124,106,247,0.15); border: 1px solid var(--accent); border-radius: 5px; color: var(--t0); font-size: 13px; font-weight: 700; font-family: var(--font); outline: none; box-sizing: border-box; }
 .tbl-editor-head:focus { background: rgba(124,106,247,0.25); }
 
-.mobile-focus-btn, .mobile-focus-sep { display: flex; }
-
-/* ── Full screen (focus) reading mode — all screen sizes ── */
-.app.note-focus .sidebar,
-.app.note-focus .explorer,
-.app.note-focus .exp-resizer,
-.app.note-focus .exp-reopen,
-.app.note-focus .rpanel { display: none; }
-.app.note-focus .main { width: 100%; min-width: 100%; }
-.app.note-focus .content { padding-left: max(52px, calc((100% - 880px) / 2)); padding-right: max(52px, calc((100% - 880px) / 2)); }
-
-/* ── Explorer resize handle & reopen strip ── */
-.exp-resizer { width: 5px; flex-shrink: 0; cursor: col-resize; background: transparent; z-index: 21; transition: background var(--tr); }
-.exp-resizer:hover, .exp-resizer.active { background: rgba(108,99,255,0.5); }
-.exp-reopen { width: 22px; flex-shrink: 0; border: none; border-right: 1px solid var(--border); background: var(--bg1); color: var(--t2); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all var(--tr); }
-.exp-reopen:hover { color: var(--t0); background: var(--glass-hi); }
+.mobile-focus-btn, .mobile-focus-sep { display: none; }
 .md-view img, .html-snippet-preview img { max-width: 100%; height: auto; }
 .md-view table, .html-snippet-preview table { max-width: 100%; }
 .html-snippet-preview { overflow-x: auto; }
@@ -760,8 +668,7 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
   .sidebar { width: 56px; min-width: 56px; }
   .sidebar .nav-label, .sidebar .slogo-text { opacity: 0; width: 0; }
   .sidebar .slogo { padding: 12px 13px; }
-  .explorer { width: calc(100vw - 56px) !important; min-width: calc(100vw - 56px) !important; }
-  .exp-resizer, .exp-reopen { display: none; }
+  .explorer { width: calc(100vw - 56px); min-width: calc(100vw - 56px); }
   .main { display: none; min-width: 100vw; }
   .rpanel, .rpanel.hidden { display: none; }
   .app.note-focus .sidebar,
@@ -780,15 +687,8 @@ mark { background: rgba(124,106,247,0.3); color: var(--accent2); border-radius: 
 }
 
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes cardIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes blink { 0%,80%,100% { opacity: 0; } 40% { opacity: 1; } }
-  @keyframes pulse { 0%,100% { opacity:.4; } 50% { opacity:1; } }
-  .notes-grid .note-card:nth-child(1) { animation-delay: .03s; }
-  .notes-grid .note-card:nth-child(2) { animation-delay: .06s; }
-  .notes-grid .note-card:nth-child(3) { animation-delay: .09s; }
-  .notes-grid .note-card:nth-child(4) { animation-delay: .12s; }
-  .notes-grid .note-card:nth-child(5) { animation-delay: .15s; }
-  .notes-grid .note-card:nth-child(6) { animation-delay: .18s; }
+@keyframes blink { 0%,80%,100% { opacity: 0; } 40% { opacity: 1; } }
+@keyframes pulse { 0%,100% { opacity:.4; } 50% { opacity:1; } }
 `;
 
 // ── Context Menu ──────────────────────────────────────────────────────────────
@@ -850,7 +750,7 @@ function ContextMenu({ x, y, items, onClose }) {
   );
 }
 
-// ── Drag ghost overlay ───────���────────────────────────────────────────────────
+// ── Drag ghost overlay ────────────────────────────────────────────────────────
 // Uses mouse events instead of HTML5 drag API (which is blocked in iframes)
 const dragState = { id: null, label: null };
 
@@ -1074,7 +974,7 @@ function KnowledgeGraph({ tree, notes, onFolderClick }) {
             onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(hovered === n.id ? n.parentId : hovered)}>
             <circle cx={n.x} cy={n.y} r={n.r + 4} fill={n.color} opacity="0.08"/>
             <circle cx={n.x} cy={n.y} r={n.r} fill={n.color + "22"} stroke={n.color} strokeWidth="1.5"/>
-            <text x={n.x} y={n.y + n.r + 13} textAnchor="middle" fill="var(--t1)" fontSize="10" fontFamily="Inter">
+            <text x={n.x} y={n.y + n.r + 13} textAnchor="middle" fill="#b8bdd4" fontSize="10" fontFamily="Inter">
               {n.label.length > 13 ? n.label.slice(0, 12) + "…" : n.label}
             </text>
             {n.noteCount > 0 && (
@@ -1095,11 +995,11 @@ function KnowledgeGraph({ tree, notes, onFolderClick }) {
               <circle cx={n.x} cy={n.y} r={n.r + 4} fill={n.color} opacity={isHov ? 0.15 : 0.06} style={{transition:"opacity 0.2s"}}/>
               <circle cx={n.x} cy={n.y} r={n.r} fill={n.color + "30"} stroke={n.color} strokeWidth={isHov ? 2.5 : 1.8} style={{transition:"stroke-width 0.2s"}}/>
               {/* Note count inside circle */}
-              <text x={n.x} y={n.y + 4} textAnchor="middle" fill={isHov ? n.color : "var(--t0)"} fontSize={n.noteCount > 9 ? "9" : "11"} fontWeight="700" fontFamily="Inter">
+              <text x={n.x} y={n.y + 4} textAnchor="middle" fill={isHov ? n.color : "#f0f2ff"} fontSize={n.noteCount > 9 ? "9" : "11"} fontWeight="700" fontFamily="Inter">
                 {n.noteCount || ""}
               </text>
               {/* Label below */}
-              <text x={n.x} y={n.y + n.r + 14} textAnchor="middle" fill={isHov ? "var(--t0)" : "var(--t1)"} fontSize="11" fontWeight={isHov ? "600" : "400"} fontFamily="Inter" style={{transition:"fill 0.2s"}}>
+              <text x={n.x} y={n.y + n.r + 14} textAnchor="middle" fill={isHov ? "#f0f2ff" : "#b8bdd4"} fontSize="11" fontWeight={isHov ? "600" : "400"} fontFamily="Inter" style={{transition:"fill 0.2s"}}>
                 {n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label}
               </text>
               {/* Sub-folder count hint */}
@@ -1110,7 +1010,7 @@ function KnowledgeGraph({ tree, notes, onFolderClick }) {
               )}
               {/* Click hint on hover */}
               {isHov && (
-                <text x={n.x} y={n.y + n.r + (n.children.length > 0 ? 38 : 26)} textAnchor="middle" fill="var(--t2)" fontSize="9" fontFamily="Inter">
+                <text x={n.x} y={n.y + n.r + (n.children.length > 0 ? 38 : 26)} textAnchor="middle" fill="#6e7491" fontSize="9" fontFamily="Inter">
                   click to open
                 </text>
               )}
@@ -1123,12 +1023,12 @@ function KnowledgeGraph({ tree, notes, onFolderClick }) {
           onMouseEnter={() => setHovered("__hub__")} onMouseLeave={() => setHovered(null)}>
           <circle cx={cx} cy={cy} r={hubNode.r + 8} fill="url(#hubGrad)" opacity="0.12"/>
           <circle cx={cx} cy={cy} r={hubNode.r} fill="rgba(124,106,247,0.2)" stroke="#7c6af7" strokeWidth="2"/>
-          <text x={cx} y={cy - 3} textAnchor="middle" fill="var(--t0)" fontSize="8" fontWeight="700" fontFamily="Inter">Know</text>
-          <text x={cx} y={cy + 7} textAnchor="middle" fill="var(--accent2)" fontSize="8" fontWeight="700" fontFamily="Inter">ledge</text>
+          <text x={cx} y={cy - 3} textAnchor="middle" fill="#f0f2ff" fontSize="8" fontWeight="700" fontFamily="Inter">Know</text>
+          <text x={cx} y={cy + 7} textAnchor="middle" fill="#a78bfa" fontSize="8" fontWeight="700" fontFamily="Inter">ledge</text>
         </g>
 
         {/* Legend */}
-        <text x={12} y={H - 8} fill="var(--t2)" fontSize="10" fontFamily="Inter">
+        <text x={12} y={H - 8} fill="#6e7491" fontSize="10" fontFamily="Inter">
           Hover a folder to see sub-folders · Click to open
         </text>
       </svg>
@@ -1177,7 +1077,7 @@ function NewNoteModal({ tree, onClose, onCreate, defaultFolderId }) {
   );
 }
 
-// ── NewFolderModal ──────────────────���─────────────────────────────────────────
+// ── NewFolderModal ────────────────────────────────────────────────────────────
 function NewFolderModal({ tree, onClose, onCreate, defaultFolderId }) {
   const [name, setName] = useState("");
   const folders = [{ id: "__root__", label: "Root (top level)", path: [] }, ...flattenTree(tree).filter(n => n.type === "folder")];
@@ -1454,35 +1354,6 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     setTimeout(() => { ta.focus(); ta.setSelectionRange(start + prefix.length, start + prefix.length); }, 10);
   };
 
-  // ── Interactive checklists ─────────────────────────────────────────────────
-  const insertChecklist = () => insertLine("- [ ] ");
-
-  const toggleTask = (index) => {
-    let i = -1;
-    const newText = content.replace(/^(\s*)- \[([ xX])\] /gm, (m, sp, mark) => {
-      i++;
-      if (i === index) {
-        const done = mark.toLowerCase() === "x";
-        return `${sp}- [${done ? " " : "x"}] `;
-      }
-      return m;
-    });
-    setContent(newText);
-    sched(title, newText, tags, pinned, archived, color);
-  };
-
-  // Click handler for the markdown preview: toggles task checkboxes, else delegates to table editing
-  const handlePreviewClick = (e) => {
-    const chk = e.target.closest(".task-check, .task-txt");
-    if (chk) {
-      const li = chk.closest("li.task");
-      const all = [...e.currentTarget.querySelectorAll("li.task")];
-      const idx = all.indexOf(li);
-      if (idx >= 0) { toggleTask(idx); return; }
-    }
-    handleTableClick(e);
-  };
-
   const insertTable = () => {
     const tbl = "\n| Header 1 | Header 2 | Header 3 |\n|----------|----------|----------|\n| Cell 1   | Cell 2   | Cell 3   |\n| Cell 4   | Cell 5   | Cell 6   |\n";
     const ta = textareaRef.current;
@@ -1494,9 +1365,14 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     setTimeout(() => { ta.focus(); }, 10);
   };
 
+  const [annotations, setAnnotations] = useState(note.annotations || {});
+  const [annotPopup, setAnnotPopup] = useState(null); // { word, x, y }
+  const [annotDraft, setAnnotDraft] = useState("");
+
   useEffect(() => {
     setTitle(note.title || ""); setContent(note.content || ""); setTags(note.tags || []);
     setPinned(note.pinned || false); setArchived(note.archived || false); setColor(note.color || "");
+    setAnnotations(note.annotations || {});
     setPreview(true); // ← always open in preview
   }, [noteId]);
 
@@ -1506,6 +1382,36 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     setSaved(true);
   };
   const sched = (t, c, tg, p, ar, cl) => { setSaved(false); pushHistory(c); clearTimeout(timer.current); timer.current = setTimeout(() => save(t, c, tg, p, ar, cl), 700); };
+
+  const saveAnnotation = (word, text) => {
+    const next = text.trim()
+      ? { ...annotations, [word]: text.trim() }
+      : Object.fromEntries(Object.entries(annotations).filter(([k]) => k !== word));
+    setAnnotations(next);
+    onUpdate(noteId, { annotations: next });
+    setAnnotPopup(null);
+    onToast(text.trim() ? "Annotation saved" : "Annotation removed", ic.check);
+  };
+
+  const handlePreviewDblClick = (e) => {
+    if (!preview || advancedEdit) return;
+    const sel = window.getSelection();
+    const word = sel?.toString().trim();
+    if (!word || word.split(/\s+/).length > 5) return;
+    const x = Math.min(e.clientX, window.innerWidth - 320);
+    const y = Math.min(e.clientY + 12, window.innerHeight - 220);
+    setAnnotDraft(annotations[word] || "");
+    setAnnotPopup({ word, x, y });
+  };
+
+  useEffect(() => {
+    if (!annotPopup) return;
+    const onKey = (e) => { if (e.key === "Escape") setAnnotPopup(null); };
+    const onDown = (e) => { if (!e.target.closest(".word-note-popup")) setAnnotPopup(null); };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("mousedown", onDown); };
+  }, [annotPopup]);
 
   const words = content.trim() ? content.trim().split(/\s+/).length : 0;
   const COLORS = ["", "#FFF3CD", "#D4EDDA", "#CCE5FF", "#F8D7DA", "#E2D9F3", "#FFE4CC"];
@@ -1522,7 +1428,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   })();
 
   // ── Render preview based on content type ─────────────────────────────────
-  // ── Advanced Edit (contenteditable preview) ───���─��─────────────────────────
+  // ── Advanced Edit (contenteditable preview) ───────────────────────────────
   const [advancedEdit, setAdvancedEdit] = useState(false);
   const advEditRef = useRef(null);
 
@@ -1592,14 +1498,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
         case 'CODE': return node.closest('pre') ? inner : `\`${inner}\``;
         case 'PRE': return `\`\`\`\n${node.textContent.trim()}\n\`\`\`\n\n`;
         case 'BLOCKQUOTE': return `> ${inner.trim()}\n\n`;
-        case 'LI': {
-          if (node.classList && node.classList.contains('task')) {
-            const done = node.classList.contains('done') || (node.querySelector('.task-check') && node.querySelector('.task-check').getAttribute('aria-checked') === 'true');
-            const txt = (node.querySelector('.task-txt') ? node.querySelector('.task-txt').textContent : inner).trim();
-            return `- [${done ? 'x' : ' '}] ${txt}\n`;
-          }
-          return `- ${inner.trim()}\n`;
-        }
+        case 'LI': return `- ${inner.trim()}\n`;
         case 'UL': case 'OL': return `${inner}\n`;
         case 'BR': return '\n';
         case 'P': case 'DIV': return inner.trim() ? `${inner.trim()}\n\n` : '';
@@ -1647,119 +1546,10 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     if (contentType === "html-snippet") {
       return (
         <div className="md-view"
-          dangerouslySetInnerHTML={{ __html: content }} />
+          dangerouslySetInnerHTML={{ __html: wrapAnnotations(content, annotations) }} />
       );
     }
-    return <div className="md-view" onClick={handlePreviewClick} dangerouslySetInnerHTML={{ __html: renderMD(content) }} />;
-  };
-
-  // ── Slash command menu ─────────────────────────────────────────────────────
-  const [slashMenu, setSlashMenu] = useState(null); // { x, y, filter, triggerPos }
-  const slashRef = useRef(null);
-
-  const SLASH_COMMANDS = [
-    { icon: "H1", label: "Heading 1",      desc: "Large section heading",    action: () => insertLine("# ")            },
-    { icon: "H2", label: "Heading 2",      desc: "Medium section heading",   action: () => insertLine("## ")           },
-    { icon: "H3", label: "Heading 3",      desc: "Small section heading",    action: () => insertLine("### ")          },
-    { icon: "—",  label: "Divider",        desc: "Horizontal rule",          action: () => insertLine("---")           },
-    { icon: "•",  label: "Bullet list",    desc: "Unordered list",           action: () => insertLine("- ")            },
-    { icon: "1.", label: "Numbered list",  desc: "Ordered list",             action: () => insertLine("1. ")           },
-    { icon: "☑",  label: "Checklist",      desc: "Interactive to-do items",  action: insertChecklist                    },
-    { icon: ">",  label: "Quote",          desc: "Blockquote",               action: () => insertLine("> ")            },
-    { icon: "<>", label: "Code",           desc: "Inline code span",         action: () => insertFormat("`","`","code") },
-    { icon: "```",label: "Code block",     desc: "Multi-line code block",    action: () => insertFormat("```\n","\n```","code block") },
-    { icon: "⊞",  label: "Table",          desc: "3×2 markdown table",       action: insertTable                        },
-    { icon: "**", label: "Bold",           desc: "Bold text",                action: () => insertFormat("**","**","bold text") },
-    { icon: "_",  label: "Italic",         desc: "Italic text",              action: () => insertFormat("*","*","italic text") },
-  ];
-
-  const slashFiltered = slashMenu
-    ? SLASH_COMMANDS.filter(c =>
-        c.label.toLowerCase().startsWith(slashMenu.filter.toLowerCase()) ||
-        c.desc.toLowerCase().includes(slashMenu.filter.toLowerCase())
-      )
-    : [];
-  const [slashIdx, setSlashIdx] = useState(0);
-
-  const closeSlash = () => setSlashMenu(null);
-
-  const runSlashCommand = (cmd) => {
-    // Delete the slash + any typed filter text from content
-    const ta = textareaRef.current;
-    if (ta && slashMenu) {
-      const pos = ta.selectionStart;
-      const delLen = 1 + slashMenu.filter.length; // "/" + typed chars
-      const newText = content.slice(0, slashMenu.triggerPos) + content.slice(slashMenu.triggerPos + delLen);
-      setContent(newText);
-      // Set cursor before running action so insertLine/insertFormat use right position
-      ta.setSelectionRange(slashMenu.triggerPos, slashMenu.triggerPos);
-      setTimeout(() => {
-        cmd.action();
-      }, 0);
-    } else {
-      cmd.action();
-    }
-    closeSlash();
-  };
-
-  // Close slash menu on outside click
-  useEffect(() => {
-    if (!slashMenu) return;
-    const h = (e) => { if (!slashRef.current?.contains(e.target)) closeSlash(); };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [slashMenu]);
-
-  const handleTextareaKeyDown = (e) => {
-    if (slashMenu) {
-      const filtered = SLASH_COMMANDS.filter(c =>
-        c.label.toLowerCase().startsWith(slashMenu.filter.toLowerCase()) ||
-        c.desc.toLowerCase().includes(slashMenu.filter.toLowerCase())
-      );
-      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx(i => Math.min(i + 1, filtered.length - 1)); return; }
-      if (e.key === "ArrowUp")   { e.preventDefault(); setSlashIdx(i => Math.max(i - 1, 0)); return; }
-      if (e.key === "Enter" && !e.nativeEvent?.isComposing) {
-        e.preventDefault();
-        if (filtered[slashIdx]) runSlashCommand(filtered[slashIdx]);
-        return;
-      }
-      if (e.key === "Escape") { e.preventDefault(); closeSlash(); return; }
-    }
-  };
-
-  const handleTextareaChange = (e) => {
-    const val = e.target.value;
-    setContent(val);
-    sched(title, val, tags, pinned, archived, color);
-
-    // Slash command trigger
-    const pos = e.target.selectionStart;
-    const textBefore = val.slice(0, pos);
-    const lineStart = textBefore.lastIndexOf("\n") + 1;
-    const lineText = textBefore.slice(lineStart);
-    const slashMatch = lineText.match(/^\/(\w*)$/);
-    if (slashMatch) {
-      // Position the menu near the cursor
-      const ta = e.target;
-      const rect = ta.getBoundingClientRect();
-      setSlashIdx(0);
-      setSlashMenu({
-        x: rect.left + 20,
-        y: rect.top + 20,
-        filter: slashMatch[1],
-        triggerPos: lineStart,
-      });
-    } else {
-      // Update filter if already open
-      if (slashMenu) {
-        const slashMatch2 = lineText.match(/^\/(\w*)/);
-        if (slashMatch2) {
-          setSlashMenu(m => ({ ...m, filter: slashMatch2[1] }));
-        } else {
-          closeSlash();
-        }
-      }
-    }
+    return <div className="md-view" dangerouslySetInnerHTML={{ __html: wrapAnnotations(renderMD(content), annotations) }} />;
   };
 
   const [tagInput, setTagInput] = useState(false);
@@ -1978,10 +1768,6 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
         )}
         <button className="tbtn" onClick={copyContent}><Icon d={ic.copy} size={13} /> Copy</button>
         <button className="tbtn" onClick={exportHTML}><Icon d={ic.export} size={13} /> Export HTML</button>
-        <NoteAttachments
-          noteId={noteId}
-          attachments={note?.attachments || []}
-          onUpdate={atts => onUpdate(noteId, { attachments: atts })} />
         <button className="tbtn danger" onClick={() => onDelete(noteId)}>
           <Icon d={ic.trash} size={13} /> Delete
         </button>
@@ -2106,9 +1892,6 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
                 <button className="fmt-btn" title="Numbered list"
                   onMouseDown={adv ? e => cmd(e,'insertOrderedList') : undefined}
                   onClick={!adv ? () => insertLine("1. ") : undefined}>1. List</button>
-                <button className="fmt-btn" title="Checklist"
-                  onMouseDown={adv ? e => ins(e, `<ul><li class="task"><span class="task-check"></span><span class="task-txt">${getSel()||'To-do item'}</span></li></ul>`) : undefined}
-                  onClick={!adv ? insertChecklist : undefined}>☑ Checklist</button>
                 <button className="fmt-btn" title="Blockquote"
                   onMouseDown={adv ? e => cmd(e,'formatBlock','blockquote') : undefined}
                   onClick={!adv ? () => insertLine("> ") : undefined}>❝ Quote</button>
@@ -2175,207 +1958,59 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
                   className="md-view"
                   style={{ outline:"2px solid var(--accent)", outlineOffset:3, borderRadius:8, minHeight:300 }} />
               </div>
-            ) : renderPreview()
+            ) : (
+              <div onDoubleClick={handlePreviewDblClick}>
+                {renderPreview()}
+              </div>
+            )
           ) : (
-            <div style={{ position: "relative" }}>
-              {slashMenu && slashFiltered.length > 0 && (
-                <div ref={slashRef} className="slash-menu">
-                  <div className="slash-menu-title">Commands</div>
-                  {slashFiltered.map((cmd, i) => (
-                    <div key={cmd.label}
-                      className={`slash-item${i === slashIdx ? " sel" : ""}`}
-                      onMouseDown={e => { e.preventDefault(); runSlashCommand(cmd); }}>
-                      <span className="slash-icon">{cmd.icon}</span>
-                      <span className="slash-label">{cmd.label}</span>
-                      <span className="slash-desc">{cmd.desc}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <textarea ref={textareaRef} className="note-textarea" value={content}
-                placeholder={"Start writing…\n\nType / for commands, or use the toolbar above:\n# Heading  **bold**  `code`\n- Bullet  ☑ Checklist  > Quote"}
-                onChange={handleTextareaChange}
-                onKeyDown={handleTextareaKeyDown} />
-            </div>
+            <textarea ref={textareaRef} className="note-textarea" value={content}
+              placeholder={"Start writing…\n\nUse the toolbar above to format, or type Markdown:\n# Heading  **bold**  `code`\n- Bullet list  > Blockquote"}
+              onChange={e => { setContent(e.target.value); sched(title, e.target.value, tags, pinned, archived, color); }} />
           )}
         </div>
       </div>
-      {(() => {
-        const taskMatches = [...content.matchAll(/^- \[([ xX])\] /gm)];
-        const totalTasks = taskMatches.length;
-        const doneTasks = taskMatches.filter(m => m[1].toLowerCase() === "x").length;
-        return (
-          <div className="word-count-bar">
-            <span>{words} words</span>
-            <span>·</span>
-            <span>{content.length} chars</span>
-            <span>·</span>
-            <span>{Math.max(1, Math.ceil(words / 200))} min read</span>
-            {totalTasks > 0 && (
-              <>
-                <span>·</span>
-                <span style={{ color: doneTasks === totalTasks ? "var(--emerald)" : "var(--t2)" }}>
-                  {doneTasks}/{totalTasks} tasks
-                </span>
-                <div style={{ flex: 1, maxWidth: 80, height: 4, background: "var(--bg4)", borderRadius: 99, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${(doneTasks / totalTasks) * 100}%`, background: doneTasks === totalTasks ? "var(--emerald)" : "var(--accent)", borderRadius: 99, transition: "width 0.4s ease" }} />
-                </div>
-              </>
+      <div className="word-count-bar">
+        <span>{words} words</span>
+        <span>·</span>
+        <span>{content.length} chars</span>
+        <span>·</span>
+        <span>{Math.max(1, Math.ceil(words / 200))} min read</span>
+        {Object.keys(annotations).length > 0 && (
+          <span style={{ marginLeft: 8, color: "var(--amber)", fontSize: 11 }}>
+            💛 {Object.keys(annotations).length} annotation{Object.keys(annotations).length !== 1 ? "s" : ""}
+          </span>
+        )}
+        {!saved && <span style={{ marginLeft: "auto", color: "var(--amber)" }}>● Unsaved changes</span>}
+      </div>
+
+      {/* Annotation popup */}
+      {annotPopup && (
+        <div className="word-note-popup" style={{ left: annotPopup.x, top: annotPopup.y }}>
+          <div className="word-note-popup-title">Word Annotation</div>
+          <div className="word-note-popup-word">"{annotPopup.word}"</div>
+          <textarea
+            autoFocus
+            placeholder="Type your definition or note…"
+            value={annotDraft}
+            onChange={e => setAnnotDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) saveAnnotation(annotPopup.word, annotDraft); }}
+          />
+          <div style={{ fontSize: 11, color: "var(--t2)", marginTop: 4 }}>Ctrl+Enter to save · Esc to cancel</div>
+          <div className="word-note-popup-actions">
+            <button className="tbtn on" style={{ color: "var(--emerald)", flex: 1 }}
+              onClick={() => saveAnnotation(annotPopup.word, annotDraft)}>
+              <Icon d={ic.check} size={12} /> Save
+            </button>
+            {annotations[annotPopup.word] && (
+              <button className="tbtn danger" onClick={() => saveAnnotation(annotPopup.word, "")}>
+                <Icon d={ic.trash} size={12} /> Remove
+              </button>
             )}
-            {!saved && <span style={{ marginLeft: "auto", color: "var(--amber)" }}>● Unsaved</span>}
-          </div>
-        );
-      })()}
-
-    </div>
-  );
-}
-
-// ── NoteAttachments — compact popover version ─────────────────────────────────
-function NoteAttachments({ noteId, attachments, onUpdate }) {
-  const [open, setOpen] = useState(false);
-  const [progress, setProgress] = useState({});
-  const [error, setError] = useState(null);
-  const fileInputRef = useRef(null);
-  const popoverRef = useRef(null);
-  const MAX_FILE_MB = 50;
-  const list = attachments || [];
-
-  // Close popover on outside click
-  useEffect(() => {
-    if (!open) return;
-    const h = (e) => { if (!popoverRef.current?.contains(e.target)) setOpen(false); };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [open]);
-
-  const fileColor = (type, name) => {
-    const ext = (name || "").split(".").pop().toLowerCase();
-    if (type && type.startsWith("image/")) return "var(--emerald)";
-    if (ext === "pdf") return "var(--rose)";
-    if (["docx","doc","odt"].includes(ext)) return "var(--accent)";
-    if (["xlsx","xls","csv"].includes(ext)) return "var(--emerald)";
-    if (["pptx","ppt"].includes(ext)) return "var(--orange)";
-    return "var(--teal)";
-  };
-
-  const formatSize = (bytes) => {
-    if (!bytes) return "";
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
-    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-  };
-
-  const uploadFiles = async (files) => {
-    if (!files || files.length === 0) return;
-    setError(null);
-    const oversized = [...files].find(f => f.size > MAX_FILE_MB * 1024 * 1024);
-    if (oversized) { setError(`"${oversized.name}" exceeds ${MAX_FILE_MB} MB`); return; }
-
-    const newList = [...list];
-    for (const file of [...files]) {
-      setProgress(p => ({ ...p, [file.name]: 10 }));
-      // Animate progress while the actual upload runs
-      let fakePct = 10;
-      const ticker = setInterval(() => {
-        fakePct = Math.min(fakePct + Math.random() * 8, 90);
-        setProgress(p => ({ ...p, [file.name]: Math.round(fakePct) }));
-      }, 300);
-      try {
-        const result = await firebaseFileStore.upload(noteId, file);
-        clearInterval(ticker);
-        setProgress(p => ({ ...p, [file.name]: 100 }));
-        newList.push(result);
-      } catch (err) {
-        clearInterval(ticker);
-        setError(`Upload failed: ${err.message}`);
-        setProgress(p => { const n = { ...p }; delete n[file.name]; return n; });
-      }
-    }
-    onUpdate(newList);
-    setTimeout(() => setProgress({}), 1000);
-  };
-
-  const handleRemove = async (att) => {
-    try { await firebaseFileStore.remove(att.path); } catch {}
-    onUpdate(list.filter(a => a.id !== att.id));
-  };
-
-  return (
-    <div style={{ position: "relative", display: "inline-flex" }} ref={popoverRef}>
-      {/* Compact trigger button */}
-      <button
-        className={`tbtn${list.length > 0 ? " on" : ""}`}
-        title="Reference documents"
-        onClick={() => { setOpen(o => !o); setError(null); }}>
-        <Icon d={ic.paperclip} size={13} />
-        {list.length > 0 && <span style={{ marginLeft: 4 }}>{list.length}</span>}
-      </button>
-      <input ref={fileInputRef} type="file" multiple style={{ display: "none" }}
-        accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.txt,.md,.png,.jpg,.jpeg,.gif,.webp,.zip,.json"
-        onChange={e => { uploadFiles(e.target.files); e.target.value = ""; }} />
-
-      {/* Popover */}
-      {open && (
-        <div className="att-popover">
-          <div className="att-pop-head">
-            <span className="att-pop-title">
-              <Icon d={ic.paperclip} size={13} stroke="var(--t2)" /> Reference Documents
-            </span>
-            <button className="ibtn" title="Attach file" onClick={() => fileInputRef.current?.click()}>
-              <Icon d={ic.plus} size={14} />
+            <button className="tbtn" onClick={() => setAnnotPopup(null)}>
+              <Icon d={ic.close} size={12} /> Cancel
             </button>
           </div>
-
-          {/* Upload progress items */}
-          {Object.entries(progress).map(([name, pct]) => (
-            <div key={name} className="att-row">
-              <div className="att-file-icon" style={{ color: "var(--accent)" }}>
-                <Icon d={ic.upload} size={13} />
-              </div>
-              <div className="att-row-main">
-                <div className="att-row-name">{name}</div>
-                <div className="att-progress-wrap"><div className="att-progress-bar" style={{ width: `${pct}%` }} /></div>
-              </div>
-              <span style={{ fontSize: 10, color: "var(--t2)" }}>{pct < 100 ? `${pct}%` : "Done"}</span>
-            </div>
-          ))}
-
-          {/* File list */}
-          {list.length === 0 && Object.keys(progress).length === 0 && (
-            <div className="att-empty"
-              onClick={() => fileInputRef.current?.click()}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); uploadFiles(e.dataTransfer.files); }}>
-              <Icon d={ic.upload} size={18} stroke="var(--t2)" />
-              <span>Click or drop files to attach</span>
-            </div>
-          )}
-
-          {list.map(att => (
-            <div key={att.id} className="att-row">
-              <div className="att-file-icon" style={{ color: fileColor(att.type, att.name) }}>
-                <Icon d={ic.file} size={13} />
-              </div>
-              <div className="att-row-main">
-                <div className="att-row-name" title={att.name}>{att.name}</div>
-                <div className="att-row-meta">{formatSize(att.size)}{att.type ? ` · ${(att.type.split("/")[1] || att.type).toUpperCase()}` : ""}</div>
-              </div>
-              <a href={att.url} target="_blank" rel="noopener noreferrer" className="ibtn" title="Open">
-                <Icon d={ic.externalLink} size={12} />
-              </a>
-              <button className="ibtn" title="Remove" style={{ color: "var(--rose)" }} onClick={() => handleRemove(att)}>
-                <Icon d={ic.trash} size={12} />
-              </button>
-            </div>
-          ))}
-
-          {error && (
-            <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 10px", fontSize: 11, color: "var(--rose)", borderTop: "1px solid var(--border)" }}>
-              <Icon d={ic.close} size={11} stroke="var(--rose)" />
-              {error}
-              <button onClick={() => setError(null)} style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", fontSize: 11, color: "var(--t2)", padding: 0 }}>×</button>
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -2423,7 +2058,7 @@ function Dashboard({ notes, tree, onOpenNote, onFolderClick }) {
           {pinnedNotes.map(([id, note]) => (
             <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderColor: "rgba(244,114,182,0.3)", borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
               <div className="nc-title"><Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />{note.title}</div>
-              <div className="nc-preview">{plainText(note.content)}</div>
+              <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
               <div className="nc-footer"><div className="nc-date">{note.updated}</div><div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-purple">{t}</span>)}</div></div>
             </div>
           ))}
@@ -2434,7 +2069,7 @@ function Dashboard({ notes, tree, onOpenNote, onFolderClick }) {
         {recent.map(([id, note]) => (
           <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
             <div className="nc-title">{note.title}</div>
-            <div className="nc-preview">{plainText(note.content)}</div>
+            <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
             <div className="nc-footer"><div className="nc-date">{note.updated}</div><div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div></div>
           </div>
         ))}
@@ -2520,131 +2155,56 @@ function AIAssistant({ notes }) {
   );
 }
 
-// ── GlobalSearch ───────────────────────────────────���──────────────────────────
+// ── GlobalSearch ──────────────────────────────────────────────────────────────
 function GlobalSearch({ notes, tree, onOpenNote }) {
-  const [q, setQ] = useState(""), [filter, setFilter] = useState("all"), [tagFilter, setTagFilter] = useState(null);
-  const inputRef = React.useRef(null);
+  const [q, setQ] = useState(""), [filter, setFilter] = useState("all");
   const all = flattenTree(tree);
-
-  const allTags = [...new Set(Object.values(notes || {}).flatMap(n => n.tags || []))].sort();
-
-  const hl = t => q.trim()
-    ? t.replace(new RegExp(`(${q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>")
-    : t;
-
-  // Smart snippet: find the sentence/window around the first match
-  const snippet = (content, maxLen = 240) => {
-    const clean = (content || "").replace(/[#*`>~\[\]]/g, "").replace(/\n+/g, " ").trim();
-    if (!q.trim()) return clean.slice(0, maxLen);
-    const idx = clean.toLowerCase().indexOf(q.toLowerCase());
-    if (idx === -1) return clean.slice(0, maxLen);
-    const start = Math.max(0, idx - 80);
-    const end = Math.min(clean.length, idx + maxLen - 80);
-    return (start > 0 ? "…" : "") + clean.slice(start, end) + (end < clean.length ? "…" : "");
-  };
-
+  const hl = t => q.trim() ? t.replace(new RegExp(`(${q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>") : t;
   const results = q.trim().length < 2 ? [] : all.filter(n => {
     const note = notes[n.id];
-    const matchQ = n.label.toLowerCase().includes(q.toLowerCase()) ||
-      (note && ((note.content || "").toLowerCase().includes(q.toLowerCase()) ||
-        (note.tags || []).join(" ").toLowerCase().includes(q.toLowerCase())));
-    if (!matchQ) return false;
+    const match = n.label.toLowerCase().includes(q.toLowerCase()) || (note && ((note.content || "").toLowerCase().includes(q.toLowerCase()) || (note.tags || []).join(" ").toLowerCase().includes(q.toLowerCase())));
+    if (!match) return false;
     if (filter === "pinned") return note?.pinned;
     if (filter === "archived") return note?.archived;
     if (filter === "notes") return n.type === "note";
     if (filter === "folders") return n.type === "folder";
-    if (tagFilter) return (note?.tags || []).includes(tagFilter);
     return true;
-  }).slice(0, 20);
-
-  // Keyboard shortcut: focus search on Ctrl/Cmd+K (already wired in App, but autofocus on mount too)
-  useEffect(() => { inputRef.current?.focus(); }, []);
-
+  }).slice(0, 15);
   return (
-    <div className="content" style={{ paddingTop: 28, maxWidth: 720 }}>
+    <div className="content" style={{ paddingTop: 28 }}>
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: "var(--t0)", letterSpacing: "-0.4px", marginBottom: 4 }}>Search</div>
-        <div style={{ fontSize: 13, color: "var(--t2)" }}>Search across all notes, folders, tags and content</div>
+        <div style={{ fontSize: 20, fontWeight: 700, color: "var(--t0)", marginBottom: 4 }}>Global Search</div>
+        <div style={{ fontSize: 13, color: "var(--t2)" }}>Search all notes, folders, tags and content</div>
       </div>
-
-      {/* Search bar */}
-      <div className="sbar" style={{ marginBottom: 12 }}>
+      <div className="sbar">
         <Icon d={ic.search} size={18} stroke="var(--t2)" />
-        <input ref={inputRef} className="sinput" placeholder="Search anything… (Ctrl+K)" value={q} onChange={e => setQ(e.target.value)} />
-        {q && <button style={{ background:"none",border:"none",cursor:"pointer",padding:0,display:"flex" }} onClick={() => setQ("")}><Icon d={ic.close} size={16} stroke="var(--t2)" /></button>}
+        <input className="sinput" placeholder="Search anything…" value={q} onChange={e => setQ(e.target.value)} autoFocus />
+        {q && <div style={{ cursor: "pointer" }} onClick={() => setQ("")}><Icon d={ic.close} size={16} stroke="var(--t2)" /></div>}
       </div>
-
-      {/* Filter row */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
         {["all", "notes", "folders", "pinned", "archived"].map(f => (
-          <button key={f} className={`tag-chip${filter === f ? " active" : ""}`} onClick={() => setFilter(f)}>
+          <button key={f} className={`tbtn${filter === f ? " on" : ""}`} onClick={() => setFilter(f)} style={{ fontSize: 12, padding: "4px 10px" }}>
             {f.charAt(0).toUpperCase() + f.slice(1)}
           </button>
         ))}
-        {q.trim().length >= 2 && (
-          <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--t2)" }}>
-            {results.length} result{results.length !== 1 ? "s" : ""}
-          </span>
-        )}
+        {q.trim().length >= 2 && <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--t2)", alignSelf: "center" }}>{results.length} result{results.length !== 1 ? "s" : ""}</span>}
       </div>
-
-      {/* Tag chips */}
-      {allTags.length > 0 && (
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 16 }}>
-          {allTags.map(t => (
-            <button key={t} className={`tag-chip${tagFilter === t ? " active" : ""}`}
-              onClick={() => setTagFilter(tf => tf === t ? null : t)}>
-              #{t}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Results */}
-      {results.map(node => {
-        const note = notes[node.id];
-        return (
-          <div key={node.id} className="sresult" onClick={() => node.type === "note" && onOpenNote(node.id)}>
-            <div className="sric">
-              <Icon d={node.type === "folder" ? ic.folder : ic.file} size={15}
-                stroke={node.type === "folder" ? "var(--amber)" : "var(--teal)"} />
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                <div className="sr-title" dangerouslySetInnerHTML={{ __html: hl(node.label) }} />
-                {note?.pinned && <Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />}
-                {(note?.tags || []).map(t => (
-                  <span key={t} className="badge badge-teal" style={{ fontSize: 10 }}>{t}</span>
-                ))}
-              </div>
-              <div className="sr-path">{node.path.join(" › ")}</div>
-              {note && (
-                <div className="sr-prev" dangerouslySetInnerHTML={{ __html: hl(snippet(note.content)) }} />
-              )}
-              {note && (
-                <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 10, color: "var(--t2)" }}>
-                  {note.updated && <span>Updated {note.updated}</span>}
-                  {note.wordCount > 0 && <span>{note.wordCount} words</span>}
-                </div>
-              )}
-            </div>
+      {results.map(node => (
+        <div key={node.id} className="sresult" onClick={() => node.type === "note" && onOpenNote(node.id)}>
+          <div className="sric"><Icon d={node.type === "folder" ? ic.folder : ic.file} size={15} stroke={node.type === "folder" ? "var(--amber)" : "var(--teal)"} /></div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="sr-title" dangerouslySetInnerHTML={{ __html: hl(node.label) }} />
+            <div className="sr-path">{node.path.join(" › ")}</div>
+            {notes[node.id] && <div className="sr-prev" dangerouslySetInnerHTML={{ __html: hl((notes[node.id].content || "").replace(/[#*`>]/g, "").slice(0, 220)) }} />}
           </div>
-        );
-      })}
-
+          {notes[node.id]?.pinned && <Icon d={ic.pin} size={12} fill="var(--rose)" stroke="var(--rose)" />}
+        </div>
+      ))}
       {q.trim().length >= 2 && results.length === 0 && (
         <div className="empty-state">
           <div className="empty-ic"><Icon d={ic.search} size={22} stroke="var(--t2)" /></div>
-          <div className="empty-title">No results for &ldquo;{q}&rdquo;</div>
-          <div className="empty-sub">Try different keywords, remove filters, or check spelling</div>
-        </div>
-      )}
-
-      {q.trim().length < 2 && (
-        <div className="empty-state" style={{ paddingTop: 40 }}>
-          <div className="empty-ic"><Icon d={ic.search} size={22} stroke="var(--t2)" /></div>
-          <div className="empty-title">Type to search</div>
-          <div className="empty-sub">Search across titles, content, and tags. Use filters to narrow down.</div>
+          <div className="empty-title">No results for "{q}"</div>
+          <div className="empty-sub">Try different keywords or check the filter</div>
         </div>
       )}
     </div>
@@ -2663,13 +2223,10 @@ function Favorites({ notes, onOpenNote }) {
       ) : (
         <div className="notes-grid">
           {pinned.map(([id, note]) => (
-            <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderLeft: note.color ? `3px solid ${note.color}` : "3px solid var(--rose)" }}>
+            <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderColor: "rgba(244,114,182,0.3)", borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
               <div className="nc-title"><Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />{note.title}</div>
-              <div className="nc-preview">{plainText(note.content)}</div>
-              <div className="nc-footer">
-                <div className="nc-date">{note.updated}</div>
-                {(note.tags || []).length > 0 && <div style={{ display:"flex", gap:3 }}>{note.tags.slice(0,2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div>}
-              </div>
+              <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
+              <div className="nc-footer"><div className="nc-date">{note.updated}</div></div>
             </div>
           ))}
         </div>
@@ -2689,13 +2246,10 @@ function Recent({ notes, onOpenNote }) {
         {sorted.map(([id, note]) => (
           <div key={id} className="note-card" onClick={() => onOpenNote(id)} style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
             <div className="nc-title">{note.pinned && <Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />}{note.title}</div>
-            <div className="nc-preview">{plainText(note.content)}</div>
+            <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
             <div className="nc-footer">
               <div className="nc-date">{note.updated}</div>
-              <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
-                {note.wordCount > 0 && <span className="nc-wc">{note.wordCount}w</span>}
-                {(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}
-              </div>
+              <div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div>
             </div>
           </div>
         ))}
@@ -2908,152 +2462,8 @@ function RightPanel({ note, noteId, tree, onOpenNote }) {
   );
 }
 
-// ── Login Screen ──────────────────────────────────────────────────────────────
-const LOGIN_CSS = `
-/* Login screen uses hardcoded values — CSS vars are not available outside .app */
-.login-wrap {
-  min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: #0e0f14; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-}
-.login-card {
-  background: #16181f; border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 18px; padding: 40px 36px 36px; width: 100%; max-width: 380px;
-  box-shadow: 0 8px 40px rgba(0,0,0,0.5);
-}
-.login-logo {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 28px; justify-content: center;
-}
-.login-logo-mark {
-  width: 40px; height: 40px; border-radius: 11px;
-  background: linear-gradient(135deg, #7c6af7, #3ecfcf);
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 0 20px rgba(124,106,247,0.4);
-}
-.login-logo-text { font-size: 18px; font-weight: 700; color: #f5f6ff; }
-.login-logo-text span { color: #7c6af7; }
-.login-title { font-size: 22px; font-weight: 700; color: #f5f6ff; margin-bottom: 6px; text-align: center; }
-.login-sub { font-size: 13px; color: #a4abce; text-align: center; margin-bottom: 28px; line-height: 1.5; }
-.login-field { margin-bottom: 16px; }
-.login-field label { display: block; font-size: 12px; font-weight: 600; color: #ccd2ee; margin-bottom: 7px; letter-spacing: 0.02em; }
-.login-field input {
-  width: 100%; box-sizing: border-box;
-  background: #0e0f14; border: 1px solid rgba(255,255,255,0.15);
-  border-radius: 9px; padding: 11px 14px; font-size: 14px; color: #f5f6ff;
-  outline: none; transition: border-color 0.2s, box-shadow 0.2s;
-}
-.login-field input:focus { border-color: #7c6af7; box-shadow: 0 0 0 3px rgba(124,106,247,0.18); }
-.login-field input::placeholder { color: #5a6080; }
-.login-btn {
-  width: 100%; margin-top: 10px; padding: 12px; border: none; border-radius: 10px;
-  background: linear-gradient(135deg, #7c6af7, #3ecfcf);
-  color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
-  transition: opacity 0.2s, transform 0.1s;
-  display: flex; align-items: center; justify-content: center; gap: 7px;
-  letter-spacing: 0.01em;
-}
-.login-btn:hover { opacity: 0.88; transform: translateY(-1px); }
-.login-btn:active { transform: translateY(0); }
-.login-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
-.login-err {
-  font-size: 12px; color: #ff6b7a; margin-top: 12px; text-align: center;
-  min-height: 18px; background: rgba(255,107,122,0.1); border-radius: 7px;
-  padding: 8px 12px; display: block;
-}
-.login-err:empty { background: none; padding: 0; }
-`;
-
-function LoginScreen({ onLogin }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setErr(""); setLoading(true);
-    try {
-      await authApi.signIn(email.trim(), password);
-      // onLogin fires automatically via onAuthStateChanged in root
-    } catch (ex) {
-      const map = {
-        "auth/user-not-found": "No account found with that email.",
-        "auth/wrong-password": "Incorrect password. Please try again.",
-        "auth/invalid-email": "Please enter a valid email address.",
-        "auth/too-many-requests": "Too many attempts. Please wait a moment and try again.",
-        "auth/invalid-credential": "Incorrect email or password.",
-      };
-      setErr(map[ex.code] || "Sign in failed. Check your email and password.");
-    } finally { setLoading(false); }
-  };
-
-  return (
-    <div className="login-wrap">
-      <style>{LOGIN_CSS}</style>
-      <div className="login-card">
-        <div className="login-logo">
-          <div className="login-logo-mark">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-1.04Z" />
-              <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-1.04Z" />
-            </svg>
-          </div>
-          <div className="login-logo-text">Know<span>ledge</span> OS</div>
-        </div>
-        <div className="login-title">Welcome back</div>
-        <div className="login-sub">Your notes are private — sign in to access them.</div>
-        <form onSubmit={submit}>
-          <div className="login-field">
-            <label htmlFor="kos-email">Email</label>
-            <input id="kos-email" type="email" autoComplete="email" placeholder="you@example.com"
-              value={email} onChange={e => setEmail(e.target.value)} required />
-          </div>
-          <div className="login-field">
-            <label htmlFor="kos-pass">Password</label>
-            <input id="kos-pass" type="password" autoComplete="current-password" placeholder="••••••••"
-              value={password} onChange={e => setPassword(e.target.value)} required />
-          </div>
-          {err && <div className="login-err">{err}</div>}
-          <button className="login-btn" type="submit" disabled={loading}>
-            {loading ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ── Root — handles auth state, shows login or app ─────────────────────────────
-function Root() {
-  // null = still checking (Firebase restores session from IndexedDB)
-  // false = definitely not signed in
-  // object = signed-in user
-  const [user, setUser] = useState(null);
-
-  useEffect(() => {
-    const unsub = authApi.onAuthChange(u => setUser(u || false));
-    return unsub;
-  }, []);
-
-  // Show splash while Firebase silently restores the stored session from IndexedDB
-  if (user === null) return (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", background:"#0e0f14", flexDirection:"column", gap:14 }}>
-      <style>{LOGIN_CSS}</style>
-      <div className="login-logo-mark" style={{ width:48, height:48, borderRadius:13 }}>
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-1.04Z" />
-          <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-1.04Z" />
-        </svg>
-      </div>
-      <div style={{ color:"#a4abce", fontSize:13 }}>Loading…</div>
-    </div>
-  );
-
-  if (!user) return <LoginScreen />;
-  return <App user={user} />;
-}
-
 // ── Main App ──────────────────────────────────────────────────────────────────
-function App({ user }) {
+function App() {
   const [tree, setTree] = useState(null);
   const [notes, setNotes] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3071,54 +2481,6 @@ function App({ user }) {
 
   const [syncStatus, setSyncStatus] = useState("idle");
   const isInitialLoad = useRef(true); // prevent saving seeds to Drive on first load
-
-  // ── Explorer width (resizable) + hide toggle ────────────────────────────────
-  const isMobile = () => window.innerWidth <= 760;
-  const [expWidth, setExpWidth] = useState(() => {
-    try { return Math.min(440, Math.max(170, parseInt(localStorage.getItem("kos_exp_width")) || 252)); } catch { return 252; }
-  });
-  const [expHidden, setExpHidden] = useState(false);
-  const [expResizing, setExpResizing] = useState(false);
-  const startExpResize = (e) => {
-    e.preventDefault();
-    const startX = e.clientX, startW = expWidth;
-    setExpResizing(true);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    let latest = startW;
-    const onMove = ev => {
-      latest = Math.min(440, Math.max(170, startW + (ev.clientX - startX)));
-      setExpWidth(latest);
-    };
-    const onUp = () => {
-      setExpResizing(false);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      try { localStorage.setItem("kos_exp_width", String(latest)); } catch {}
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  // Escape exits full screen reading mode
-  useEffect(() => {
-    const onKey = e => { if (e.key === "Escape") setMobileNoteFocus(false); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  // ── Theme (light / dark) ─────────���──────────────────────────────────────────
-  const [theme, setTheme] = useState(() => {
-    try { return localStorage.getItem("kos_theme") || "dark"; } catch { return "dark"; }
-  });
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    document.documentElement.style.background = theme === "light" ? "#f4f4f7" : "#0a0b0f";
-    try { localStorage.setItem("kos_theme", theme); } catch {}
-  }, [theme]);
-  const toggleTheme = () => setTheme(t => (t === "light" ? "dark" : "light"));
 
   // ── Load: Firebase first → localStorage → seeds (READ ONLY) ───────────
   useEffect(() => {
@@ -3266,7 +2628,7 @@ function App({ user }) {
   const createNote = (id, folderId, data) => {
     setNotes(p => ({ ...p, [id]: data }));
     setTree(t => addToFolder(t, folderId, { id, label: data.title, type: "note", tags: data.tags || [] }));
-    setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile());
+    setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(true);
     showToast("Note created", ic.check);
   };
 
@@ -3370,7 +2732,6 @@ function App({ user }) {
   }, []); // empty deps — ref always current, no stale closure
 
   const [folderView, setFolderView] = useState(null); // { id, label } of clicked folder
-  const [activeTag, setActiveTag] = useState(null); // tag filter for explorer
 
   const handleMoveRef = useRef(null);
   const handleMove = (dragId, targetFolderId) => {
@@ -3405,7 +2766,7 @@ function App({ user }) {
     });
   };
 
-  const openNote_ = id => { setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile()); };
+  const openNote_ = id => { setOpenNote(id); setSelId(id); setActiveNav("knowledge"); setMobileNoteFocus(true); };
 
   const showExplorer = ["knowledge", "recent", "favorites", "dashboard"].includes(activeNav);
 
@@ -3475,10 +2836,10 @@ function App({ user }) {
                     const note = notes[n.id];
                     if (!note) return null;
                     return (
-                      <div key={n.id} className="note-card" onClick={() => { setOpenNote(n.id); setSelId(n.id); setMobileNoteFocus(isMobile()); }}
+                      <div key={n.id} className="note-card" onClick={() => { setOpenNote(n.id); setSelId(n.id); setMobileNoteFocus(true); }}
                         style={{ borderLeft: note.color ? `3px solid ${note.color}` : undefined }}>
                         <div className="nc-title">{note.pinned && <Icon d={ic.pin} size={11} fill="var(--rose)" stroke="var(--rose)" />}{note.title}</div>
-                        <div className="nc-preview">{plainText(note.content)}</div>
+                        <div className="nc-preview">{(note.content || "").replace(/[#*`>]/g, "").trim()}</div>
                         <div className="nc-footer">
                           <div className="nc-date">{note.updated}</div>
                           <div style={{ display: "flex", gap: 3 }}>{(note.tags || []).slice(0, 2).map(t => <span key={t} className="badge badge-teal">{t}</span>)}</div>
@@ -3580,17 +2941,6 @@ function App({ user }) {
               <Icon d={ic.plus} size={15} />
               <span className="nav-label">New Note</span>
             </button>
-            <button className="stoggle" onClick={toggleTheme} title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}>
-              <Icon d={theme === "light" ? ic.moon : ic.sun} size={15} />
-              <span className="nav-label" style={{ fontSize: 12, marginLeft: 8 }}>{theme === "light" ? "Dark mode" : "Light mode"}</span>
-            </button>
-            <button className="stoggle" onClick={() => authApi.signOut()} title="Sign out"
-              style={{ color: "var(--rose)" }}>
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
-              </svg>
-              <span className="nav-label" style={{ fontSize: 12, marginLeft: 8 }}>Sign out</span>
-            </button>
             <button className="stoggle" onClick={() => setSideCollapsed(c => !c)}>
               <Icon d={sideCollapsed ? ic.chevronRight : ic.menu} size={15} />
             </button>
@@ -3598,85 +2948,33 @@ function App({ user }) {
         </div>
 
         {/* Explorer */}
-        <div className={`explorer${showExplorer && !expHidden ? "" : " hidden"}`}
-          style={showExplorer && !expHidden ? { width: expWidth, minWidth: expWidth } : undefined}>
+        <div className={`explorer${showExplorer ? "" : " hidden"}`}>
           <div className="exp-header">
             <div className="exp-title">Explorer</div>
             <div className="exp-actions">
               <button className="ibtn" onClick={() => setShowNewNote(true)} title="New note"><Icon d={ic.plus} size={15} /></button>
               <button className="ibtn" onClick={() => setShowNewFolder(true)} title="New folder"><Icon d={ic.folderPlus} size={15} /></button>
-              <button className="ibtn" onClick={() => setExpHidden(true)} title="Hide explorer">
-                <span style={{ display: "flex", transform: "rotate(180deg)" }}><Icon d={ic.chevronRight} size={15} /></span>
-              </button>
             </div>
           </div>
-          {/* Tag filter bar */}
-          {(() => {
-            const allTags = [...new Set(Object.values(notes || {}).flatMap(n => n.tags || []))].sort();
-            if (!allTags.length) return null;
-            return (
-              <div className="tag-filter-bar">
-                <div className="tag-filter-scroll">
-                  <button className={`tag-chip${!activeTag ? " active" : ""}`} onClick={() => setActiveTag(null)}>All</button>
-                  {allTags.map(t => (
-                    <button key={t} className={`tag-chip${activeTag === t ? " active" : ""}`} onClick={() => setActiveTag(at => at === t ? null : t)}>{t}</button>
-                  ))}
-                </div>
-              </div>
-            );
-          })()}
           <div className="tree-wrap">
-            {activeTag ? (
-              // Tag-filtered flat list of notes
-              (() => {
-                const tagged = Object.entries(notes || {})
-                  .filter(([_, n]) => (n.tags || []).includes(activeTag) && !n.archived)
-                  .sort((a, b) => (b[1].updated || "").localeCompare(a[1].updated || ""));
-                return tagged.length === 0 ? (
-                  <div style={{ padding: "18px 10px", fontSize: 12, color: "var(--t2)", textAlign: "center" }}>No notes tagged "{activeTag}"</div>
-                ) : tagged.map(([id, note]) => (
-                  <div key={id}
-                    className={`tree-row${selId === id ? " sel" : ""}`}
-                    onClick={() => { setSelId(id); setFolderView(null); setOpenNote(id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile()); }}>
-                    <Icon d={ic.file} size={13} stroke="var(--teal)" style={{ flexShrink: 0 }} />
-                    <span className="tree-lbl">{note.title || "Untitled"}</span>
-                    {note.pinned && <Icon d={ic.pin} size={10} fill="var(--rose)" stroke="var(--rose)" />}
-                  </div>
-                ));
-              })()
-            ) : (
-              tree.map(node => (
-                <TreeNode key={node.id} node={node} depth={0} selId={selId}
-                  onSelect={n => {
-                    if (n._pin) { updateNote(n.id, { pinned: !notes[n.id]?.pinned }); showToast(notes[n.id]?.pinned ? "Unpinned" : "Pinned", ic.pin); return; }
-                    setSelId(n.id); setFolderView(null);
-                    if (notes[n.id]) { setOpenNote(n.id); setActiveNav("knowledge"); setMobileNoteFocus(isMobile()); }
-                  }}
-                  onToggle={id => setTree(t => toggleExpand(t, id))}
-                  onRename={renameItem}
-                  onDelete={handleTreeDelete}
-                  onNewNote={handleTreeNewNote}
-                  onNewFolder={handleTreeNewFolder}
-                  onMove={handleMove}
-                  onFolderClick={handleFolderClick}
-                  dropTargetId={dropTargetId} />
-              ))
-            )}
+            {tree.map(node => (
+              <TreeNode key={node.id} node={node} depth={0} selId={selId}
+                onSelect={n => {
+                  if (n._pin) { updateNote(n.id, { pinned: !notes[n.id]?.pinned }); showToast(notes[n.id]?.pinned ? "Unpinned" : "Pinned", ic.pin); return; }
+                  setSelId(n.id); setFolderView(null);
+                  if (notes[n.id]) { setOpenNote(n.id); setActiveNav("knowledge"); setMobileNoteFocus(true); }
+                }}
+                onToggle={id => setTree(t => toggleExpand(t, id))}
+                onRename={renameItem}
+                onDelete={handleTreeDelete}
+                onNewNote={handleTreeNewNote}
+                onNewFolder={handleTreeNewFolder}
+                onMove={handleMove}
+                onFolderClick={handleFolderClick}
+                dropTargetId={dropTargetId} />
+            ))}
           </div>
         </div>
-
-        {/* Explorer resize handle / reopen strip */}
-        {showExplorer && !expHidden && (
-          <div className={`exp-resizer${expResizing ? " active" : ""}`}
-            onMouseDown={startExpResize}
-            onDoubleClick={() => setExpHidden(true)}
-            title="Drag to resize · Double-click to hide" />
-        )}
-        {showExplorer && expHidden && (
-          <button className="exp-reopen" onClick={() => setExpHidden(false)} title="Show explorer">
-            <Icon d={ic.chevronRight} size={14} />
-          </button>
-        )}
 
         {/* Main */}
         <div className="main">{renderMain()}</div>
@@ -3705,14 +3003,7 @@ function App({ user }) {
 }
 
 
-ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Root));
-</script>
-<script>
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
-    });
-  }
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
 </script>
 </body>
 </html>
