@@ -1393,24 +1393,31 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     onToast(text.trim() ? "Annotation saved" : "Annotation removed", ic.check);
   };
 
-  const handlePreviewDblClick = (e) => {
-    if (!preview || advancedEdit) return;
-    const sel = window.getSelection();
-    const word = sel?.toString().trim();
-    if (!word || word.split(/\s+/).length > 5) return;
-    const x = Math.min(e.clientX, window.innerWidth - 320);
-    const y = Math.min(e.clientY + 12, window.innerHeight - 220);
-    setAnnotDraft(annotations[word] || "");
-    setAnnotPopup({ word, x, y });
-  };
+  // Ctrl+K on selected text opens annotation popup
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "k" && (e.ctrlKey || e.metaKey) && preview && !advancedEdit) {
+        const sel = window.getSelection();
+        const word = sel?.toString().trim();
+        if (!word || word.split(/\s+/).length > 5) return;
+        e.preventDefault();
+        const range = sel.getRangeAt(0).getBoundingClientRect();
+        const x = Math.min(range.left, window.innerWidth - 320);
+        const y = Math.min(range.bottom + 8, window.innerHeight - 220);
+        setAnnotDraft(annotations[word] || "");
+        setAnnotPopup({ word, x, y });
+      }
+      if (e.key === "Escape") setAnnotPopup(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [preview, advancedEdit, annotations]);
 
   useEffect(() => {
     if (!annotPopup) return;
-    const onKey = (e) => { if (e.key === "Escape") setAnnotPopup(null); };
     const onDown = (e) => { if (!e.target.closest(".word-note-popup")) setAnnotPopup(null); };
-    document.addEventListener("keydown", onKey);
     document.addEventListener("mousedown", onDown);
-    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("mousedown", onDown); };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [annotPopup]);
 
   const words = content.trim() ? content.trim().split(/\s+/).length : 0;
@@ -1958,11 +1965,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
                   className="md-view"
                   style={{ outline:"2px solid var(--accent)", outlineOffset:3, borderRadius:8, minHeight:300 }} />
               </div>
-            ) : (
-              <div onDoubleClick={handlePreviewDblClick}>
-                {renderPreview()}
-              </div>
-            )
+            ) : renderPreview()
           ) : (
             <textarea ref={textareaRef} className="note-textarea" value={content}
               placeholder={"Start writing…\n\nUse the toolbar above to format, or type Markdown:\n# Heading  **bold**  `code`\n- Bullet list  > Blockquote"}
