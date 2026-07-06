@@ -2896,6 +2896,23 @@ function App() {
     }
   };
 
+  // Must be before any early return to satisfy Rules of Hooks
+  const orphanedNotes = React.useMemo(() => {
+    if (!notes || !tree) return [];
+    const treeIds = new Set(flattenTree(tree).filter(n => n.type === "note").map(n => n.id));
+    return Object.entries(notes).filter(([id]) => !treeIds.has(id)).map(([id, n]) => ({ id, ...n }));
+  }, [notes, tree]);
+
+  const restoreOrphan = (noteId, folderId) => {
+    const n = notes[noteId];
+    if (!n) return;
+    const item = { id: noteId, label: n.title, type: "note", tags: n.tags || [] };
+    if (folderId === "__root__") { setTree(t => [...t, item]); }
+    else { setTree(t => addToFolder(t, folderId, item)); }
+    showToast(`Restored "${n.title}"`, ic.check);
+    if (orphanedNotes.length <= 1) setShowOrphanModal(false);
+  };
+
   if (loading) return (
     <>
       <style>{CSS}</style>
@@ -2919,23 +2936,6 @@ function App() {
     error:   { color: "var(--rose)", label: "Firebase offline", dot: "var(--rose)", anim: false },
     idle:    { color: "var(--t2)", label: "Firebase", dot: "var(--t2)", anim: false },
   }[syncStatus] || {};
-
-  // Notes in Firebase notes{} but missing from the tree (orphaned / lost from sidebar)
-  const orphanedNotes = React.useMemo(() => {
-    if (!notes || !tree) return [];
-    const treeIds = new Set(flattenTree(tree).filter(n => n.type === "note").map(n => n.id));
-    return Object.entries(notes).filter(([id]) => !treeIds.has(id)).map(([id, n]) => ({ id, ...n }));
-  }, [notes, tree]);
-
-  const restoreOrphan = (noteId, folderId) => {
-    const n = notes[noteId];
-    if (!n) return;
-    const item = { id: noteId, label: n.title, type: "note", tags: n.tags || [] };
-    if (folderId === "__root__") { setTree(t => [...t, item]); }
-    else { setTree(t => addToFolder(t, folderId, item)); }
-    showToast(`Restored "${n.title}"`, ic.check);
-    if (orphanedNotes.length <= 1) setShowOrphanModal(false);
-  };
 
   return (
     <>
