@@ -2483,6 +2483,7 @@ function App() {
   const toastTimer = useRef(null);
 
   const [syncStatus, setSyncStatus] = useState("idle");
+  const [showOrphanModal, setShowOrphanModal] = useState(false);
   const isInitialLoad = useRef(true); // prevent saving seeds to Drive on first load
 
   // ── Load: Firebase first → localStorage → seeds (READ ONLY) ───────────
@@ -2539,6 +2540,7 @@ function App() {
 
     latestData.current = { tree, notes };
     hasUserData.current = true;
+    lastLocalChange.current = Date.now();
 
     // Always save to local cache immediately
     localCache.set("kos_tree", tree);
@@ -2556,17 +2558,32 @@ function App() {
 
   // ── Pull latest from Firebase (for live sync across devices) ────────────────
   const isPulling = useRef(false);
+  const lastLocalChange = useRef(0);
+  const syncStatusRef = useRef("idle");
+
   const pullFromDrive = async (silent = false) => {
     if (isPulling.current) return;
+    // Don't auto-pull if there was a recent local change (within 10s) — could overwrite unsaved data
+    if (silent && Date.now() - lastLocalChange.current < 10000) return;
+    // Don't auto-pull if the last save failed — Firebase likely has stale data
+    if (silent && syncStatusRef.current === "error") return;
     isPulling.current = true;
     if (!silent) setSyncStatus("syncing");
     try {
       const driveData = await gdrive.load();
       if (driveData?.tree && driveData?.notes) {
-        // Only update if Drive has newer/different data
         const driveStr = JSON.stringify(driveData);
         const localStr = JSON.stringify({ tree, notes });
         if (driveStr !== localStr) {
+          // Safety: never overwrite local data if Firebase has fewer notes
+          // (a failed Firebase save would otherwise silently delete locally-created notes)
+          const localNoteCount = Object.keys(notes || {}).length;
+          const firebaseNoteCount = Object.keys(driveData.notes).length;
+          if (silent && firebaseNoteCount < localNoteCount) {
+            setSyncStatus("error");
+            isPulling.current = false;
+            return;
+          }
           setTree(driveData.tree);
           setNotes(driveData.notes);
           await localCache.set("kos_tree", driveData.tree);
@@ -2579,11 +2596,14 @@ function App() {
     isPulling.current = false;
   };
 
+  // Keep syncStatusRef current to avoid stale closure in the 30s interval
+  useEffect(() => { syncStatusRef.current = syncStatus; }, [syncStatus]);
+
   // Auto-refresh from Drive every 30 seconds
   useEffect(() => {
     if (!tree || !notes) return;
     const interval = setInterval(() => {
-      if (!gdriveTimer.current) pullFromDrive(true); // silent refresh if not currently saving
+      if (!gdriveTimer.current) pullFromDrive(true);
     }, 30000);
     return () => clearInterval(interval);
   }, [tree, notes]);
@@ -2900,6 +2920,23 @@ function App() {
     idle:    { color: "var(--t2)", label: "Firebase", dot: "var(--t2)", anim: false },
   }[syncStatus] || {};
 
+  // Notes in Firebase notes{} but missing from the tree (orphaned / lost from sidebar)
+  const orphanedNotes = React.useMemo(() => {
+    if (!notes || !tree) return [];
+    const treeIds = new Set(flattenTree(tree).filter(n => n.type === "note").map(n => n.id));
+    return Object.entries(notes).filter(([id]) => !treeIds.has(id)).map(([id, n]) => ({ id, ...n }));
+  }, [notes, tree]);
+
+  const restoreOrphan = (noteId, folderId) => {
+    const n = notes[noteId];
+    if (!n) return;
+    const item = { id: noteId, label: n.title, type: "note", tags: n.tags || [] };
+    if (folderId === "__root__") { setTree(t => [...t, item]); }
+    else { setTree(t => addToFolder(t, folderId, item)); }
+    showToast(`Restored "${n.title}"`, ic.check);
+    if (orphanedNotes.length <= 1) setShowOrphanModal(false);
+  };
+
   return (
     <>
       <style>{CSS}</style>
@@ -2909,6 +2946,45 @@ function App() {
       {dialog?.type === "rename" && <RenameModal current={dialog.current} type={dialog.itemType} onConfirm={dialog.onConfirm} onCancel={dialog.onCancel} />}
       {toast && <Toast msg={toast.msg} icon={toast.icon} />}
       {ghost && <DragGhost label={ghost.label} x={ghost.x} y={ghost.y} />}
+
+      {/* Orphaned Notes Recovery Modal */}
+      {showOrphanModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 900, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={e => { if (e.target === e.currentTarget) setShowOrphanModal(false); }}>
+          <div style={{ background: "var(--bg2)", borderRadius: 16, padding: 24, width: 480, maxWidth: "90vw", maxHeight: "80vh", overflowY: "auto", boxShadow: "0 24px 64px rgba(0,0,0,0.7)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: "var(--t0)" }}>Recover Missing Notes</div>
+                <div style={{ fontSize: 12, color: "var(--t2)", marginTop: 3 }}>{orphanedNotes.length} note{orphanedNotes.length !== 1 ? "s" : ""} found in Firebase but missing from sidebar</div>
+              </div>
+              <button onClick={() => setShowOrphanModal(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--t2)", fontSize: 20, lineHeight: 1 }}>✕</button>
+            </div>
+            {orphanedNotes.length === 0 ? (
+              <div style={{ color: "var(--t2)", fontSize: 14, textAlign: "center", padding: "20px 0" }}>No orphaned notes found. All notes are linked in the sidebar.</div>
+            ) : orphanedNotes.map(n => {
+              const folders = [{ id: "__root__", label: "Root (top level)" }, ...flattenTree(tree).filter(x => x.type === "folder")];
+              return (
+                <div key={n.id} style={{ background: "var(--bg3)", borderRadius: 10, padding: 14, marginBottom: 10, border: "1px solid var(--border)" }}>
+                  <div style={{ fontWeight: 600, color: "var(--t0)", marginBottom: 4 }}>{n.title || "(Untitled)"}</div>
+                  <div style={{ fontSize: 12, color: "var(--t2)", marginBottom: 10 }}>{(n.content || "").slice(0, 120)}{(n.content || "").length > 120 ? "…" : ""}</div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <select id={`restore-folder-${n.id}`} defaultValue="__root__"
+                      style={{ flex: 1, background: "var(--bg4)", border: "1px solid var(--border-hi)", borderRadius: 6, padding: "5px 8px", color: "var(--t1)", fontSize: 13 }}>
+                      {folders.map(f => <option key={f.id} value={f.id}>{f.label || f.id}</option>)}
+                    </select>
+                    <button onClick={() => {
+                      const sel = document.getElementById(`restore-folder-${n.id}`);
+                      restoreOrphan(n.id, sel?.value || "__root__");
+                    }} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 7, padding: "6px 14px", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>
+                      Restore
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className={`app${mobileNoteFocus && openNote ? " note-focus" : ""}`}>
         {/* Sidebar */}
@@ -2933,6 +3009,13 @@ function App() {
               <span className="nav-label" style={{ fontSize: 11, color: syncInfo.color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                 {syncInfo.label}
               </span>
+              {/* Orphaned notes warning */}
+              {orphanedNotes.length > 0 && (
+                <button onClick={() => setShowOrphanModal(true)} title={`${orphanedNotes.length} note(s) missing from sidebar — click to recover`}
+                  style={{ background: "var(--rose)", color: "#fff", border: "none", cursor: "pointer", borderRadius: 4, padding: "1px 5px", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>
+                  {orphanedNotes.length} lost
+                </button>
+              )}
               {/* Manual sync button */}
               <button onClick={() => pullFromDrive(false)} title="Pull latest from Firebase"
                 style={{ background: "none", border: "none", cursor: "pointer", color: "var(--t2)", padding: "1px 3px", borderRadius: 4, display: "flex", flexShrink: 0 }}
