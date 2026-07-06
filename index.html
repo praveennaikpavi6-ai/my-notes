@@ -88,13 +88,14 @@ const firestoreStore = (() => {
       async load() {
         const snap = await withTimeout(stateRef.get());
         const data = snap.exists ? snap.data() : null;
-        return data?.tree && data?.notes ? { tree: data.tree, notes: data.notes } : null;
+        return data?.tree && data?.notes ? { tree: data.tree, notes: data.notes, savedAt: data.savedAt || 0 } : null;
       },
       async save(data) {
         const cleanData = stripUndefined(data);
         await stateRef.set({
           tree: cleanData.tree,
           notes: cleanData.notes,
+          savedAt: Date.now(),
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return true;
@@ -2486,21 +2487,47 @@ function App() {
   const [showOrphanModal, setShowOrphanModal] = useState(false);
   const isInitialLoad = useRef(true); // prevent saving seeds to Drive on first load
 
-  // ── Load: Firebase first → localStorage → seeds (READ ONLY) ───────────
+  // ── Load: newest of Firebase vs localStorage → seeds (READ ONLY) ───────────
   useEffect(() => {
     (async () => {
       setSyncStatus("syncing");
 
-      // 1. Try Firebase first (primary source of truth)
+      // Daily local backup: snapshot current local data before anything can overwrite it (keep 7 days)
+      try {
+        const bTree = await localCache.load("kos_tree");
+        const bNotes = await localCache.load("kos_notes");
+        if (bTree && bNotes) {
+          const today = new Date().toISOString().slice(0, 10);
+          if (!localStorage.getItem("kos_backup_" + today)) {
+            localStorage.setItem("kos_backup_" + today, JSON.stringify({ tree: bTree, notes: bNotes }));
+          }
+          // prune backups older than 7 days
+          Object.keys(localStorage).filter(k => k.startsWith("kos_backup_")).sort().slice(0, -7)
+            .forEach(k => localStorage.removeItem(k));
+        }
+      } catch (e) { console.warn("Backup failed:", e); }
+
+      // 1. Try Firebase first — but only use it if it's not older than local data
       try {
         const driveData = await gdrive.load();
         if (driveData?.tree && driveData?.notes) {
-          setTree(driveData.tree);
-          setNotes(driveData.notes);
-          // Mirror to local cache for offline use
-          await localCache.set("kos_tree", driveData.tree);
-          await localCache.set("kos_notes", driveData.notes);
-          setSyncStatus("synced");
+          const localSavedAt = Number(await localCache.load("kos_savedAt")) || 0;
+          const cachedTree = await localCache.load("kos_tree");
+          const cachedNotes = await localCache.load("kos_notes");
+          const localIsNewer = cachedTree && cachedNotes && localSavedAt > (driveData.savedAt || 0);
+          if (localIsNewer) {
+            // Local data is newer than Firebase (e.g. a save failed) — keep local, push it up
+            setTree(cachedTree);
+            setNotes(cachedNotes);
+            gdrive.save({ tree: cachedTree, notes: cachedNotes }).then(ok => setSyncStatus(ok ? "synced" : "error"));
+          } else {
+            setTree(driveData.tree);
+            setNotes(driveData.notes);
+            await localCache.set("kos_tree", driveData.tree);
+            await localCache.set("kos_notes", driveData.notes);
+            await localCache.set("kos_savedAt", driveData.savedAt || Date.now());
+            setSyncStatus("synced");
+          }
           setLoading(false);
           isInitialLoad.current = false;
           return;
@@ -2542,9 +2569,10 @@ function App() {
     hasUserData.current = true;
     lastLocalChange.current = Date.now();
 
-    // Always save to local cache immediately
+    // Always save to local cache immediately (with timestamp for conflict resolution)
     localCache.set("kos_tree", tree);
     localCache.set("kos_notes", notes);
+    localCache.set("kos_savedAt", Date.now());
 
     // Debounce Drive sync — 2.5s after last change
     clearTimeout(gdriveTimer.current);
@@ -2572,10 +2600,16 @@ function App() {
     try {
       const driveData = await gdrive.load();
       if (driveData?.tree && driveData?.notes) {
-        const driveStr = JSON.stringify(driveData);
+        const driveStr = JSON.stringify({ tree: driveData.tree, notes: driveData.notes });
         const localStr = JSON.stringify({ tree, notes });
         if (driveStr !== localStr) {
-          // Safety: never overwrite local data if Firebase has fewer notes
+          // Safety 1: never apply Firebase data that is older than our local data
+          const localSavedAt = Number(await localCache.load("kos_savedAt")) || 0;
+          if (silent && (driveData.savedAt || 0) < localSavedAt) {
+            isPulling.current = false;
+            return;
+          }
+          // Safety 2: never overwrite local data if Firebase has fewer notes
           // (a failed Firebase save would otherwise silently delete locally-created notes)
           const localNoteCount = Object.keys(notes || {}).length;
           const firebaseNoteCount = Object.keys(driveData.notes).length;
@@ -2588,6 +2622,7 @@ function App() {
           setNotes(driveData.notes);
           await localCache.set("kos_tree", driveData.tree);
           await localCache.set("kos_notes", driveData.notes);
+          await localCache.set("kos_savedAt", driveData.savedAt || Date.now());
           if (!silent) showToast("Synced from Firebase", ic.refresh);
         }
         setSyncStatus("synced");
@@ -2599,11 +2634,29 @@ function App() {
   // Keep syncStatusRef current to avoid stale closure in the 30s interval
   useEffect(() => { syncStatusRef.current = syncStatus; }, [syncStatus]);
 
-  // Auto-refresh from Drive every 30 seconds
+  // Warn before closing the tab while a Firebase save is pending or failed
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (gdriveTimer.current || syncStatusRef.current === "syncing" || syncStatusRef.current === "error") {
+        e.preventDefault();
+        e.returnValue = "Your notes are still saving to Firebase. Close anyway?";
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  // Auto-refresh from Drive every 30 seconds; if the last save failed, retry it instead of pulling
   useEffect(() => {
     if (!tree || !notes) return;
-    const interval = setInterval(() => {
-      if (!gdriveTimer.current) pullFromDrive(true);
+    const interval = setInterval(async () => {
+      if (gdriveTimer.current) return; // a save is already scheduled
+      if (syncStatusRef.current === "error" && latestData.current) {
+        const ok = await gdrive.save(latestData.current);
+        setSyncStatus(ok ? "synced" : "error");
+        return;
+      }
+      pullFromDrive(true);
     }, 30000);
     return () => clearInterval(interval);
   }, [tree, notes]);
@@ -3016,6 +3069,20 @@ function App() {
                   {orphanedNotes.length} lost
                 </button>
               )}
+              {/* Download backup button */}
+              <button onClick={() => {
+                const blob = new Blob([JSON.stringify({ tree, notes, savedAt: Date.now() }, null, 2)], { type: "application/json" });
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = `knowledge-os-backup-${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
+                URL.revokeObjectURL(a.href);
+                showToast("Backup downloaded", ic.check);
+              }} title="Download backup of all notes as a file"
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--t2)", padding: "1px 3px", borderRadius: 4, display: "flex", flexShrink: 0 }}
+                className="nav-label">
+                <Icon d={ic.export} size={12} />
+              </button>
               {/* Manual sync button */}
               <button onClick={() => pullFromDrive(false)} title="Pull latest from Firebase"
                 style={{ background: "none", border: "none", cursor: "pointer", color: "var(--t2)", padding: "1px 3px", borderRadius: 4, display: "flex", flexShrink: 0 }}
