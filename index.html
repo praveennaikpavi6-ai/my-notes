@@ -288,6 +288,20 @@ const moveNode = (nodes, dragId, targetFolderId) => {
   return insertInto(trimmed);
 };
 
+// Move dragId node so it sits directly before beforeId (reorder within/across folders)
+const moveNodeBefore = (nodes, dragId, beforeId) => {
+  const [node, trimmed] = extractNode(nodes, dragId);
+  if (!node) return nodes;
+  const insertBefore = (ns) => {
+    const idx = ns.findIndex(n => n.id === beforeId);
+    if (idx !== -1) return [...ns.slice(0, idx), node, ...ns.slice(idx)];
+    return ns.map(n => n.children ? { ...n, children: insertBefore(n.children) } : n);
+  };
+  const result = insertBefore(trimmed);
+  // If beforeId vanished (shouldn't happen), don't lose the dragged node
+  return JSON.stringify(result) === JSON.stringify(trimmed) ? nodes : result;
+};
+
 // ── Smart KOS Key generator ──────────────────────────────────────────────────
 const generateKosKey = (title, tree, folderId) => {
   // Get folder abbreviation from path
@@ -426,6 +440,7 @@ body { font-family: var(--font); background: var(--bg0); color: var(--t0); heigh
 .tree-row:hover { background: var(--glass-hi); color: var(--t0); }
 .tree-row.sel { background: rgba(124,106,247,0.14); color: var(--accent2); }
 .tree-row.drag-over { background: rgba(124,106,247,0.22); border: 1px dashed var(--accent); }
+.tree-row.drag-before { box-shadow: inset 0 2px 0 var(--accent); }
 .tree-row.dragging { opacity: 0.4; }
 .drag-handle { cursor: grab; color: var(--t2); padding: 0 2px; opacity: 0; transition: opacity var(--tr); display: flex; align-items: center; flex-shrink: 0; }
 .tree-row:hover .drag-handle { opacity: 1; }
@@ -779,6 +794,7 @@ function TreeNode({ node, depth, selId, onSelect, onToggle, onRename, onDelete, 
   const rowRef = useRef(null);
 
   const isDragTarget = dropTargetId === node.id && isF;
+  const isBeforeTarget = dropTargetId === "before:" + node.id;
 
   const handleCtx = e => {
     e.preventDefault(); e.stopPropagation();
@@ -821,7 +837,7 @@ function TreeNode({ node, depth, selId, onSelect, onToggle, onRename, onDelete, 
       {ctx && <ContextMenu x={ctx.x} y={ctx.y} items={ctx.items} onClose={() => setCtx(null)} />}
       <div
         ref={rowRef}
-        className={`tree-row${selId === node.id ? " sel" : ""}${isDragTarget ? " drag-over" : ""}`}
+        className={`tree-row${selId === node.id ? " sel" : ""}${isDragTarget ? " drag-over" : ""}${isBeforeTarget ? " drag-before" : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={handleClick}
         onContextMenu={handleCtx}
@@ -2778,7 +2794,10 @@ function App() {
       if (row) {
         const nodeId = row.getAttribute("data-nodeid");
         const nodeType = row.getAttribute("data-nodetype");
-        if (nodeType === "folder") target = nodeId;
+        if (nodeId !== dragState.id) {
+          if (nodeType === "folder") target = nodeId;
+          else if (nodeType === "note") target = "before:" + nodeId; // reorder: insert before this note
+        }
       }
       dropTargetRef.current = target;
       setDropTargetId(target);
@@ -2811,7 +2830,11 @@ function App() {
 
   const handleMoveRef = useRef(null);
   const handleMove = (dragId, targetFolderId) => {
-    setTree(t => moveNode(t, dragId, targetFolderId));
+    if (targetFolderId.startsWith("before:")) {
+      setTree(t => moveNodeBefore(t, dragId, targetFolderId.slice(7)));
+    } else {
+      setTree(t => moveNode(t, dragId, targetFolderId));
+    }
     showToast("Moved", ic.check);
   };
   handleMoveRef.current = handleMove;
