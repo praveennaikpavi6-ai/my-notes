@@ -1675,7 +1675,23 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     setTimeout(() => { ta.focus(); }, 10);
   };
 
-  const copyContent = () => { navigator.clipboard.writeText(content); onToast("Copied to clipboard", ic.check); };
+  const copyContent = async () => {
+    // Copy both markdown (for Edit mode) and rendered HTML (for Advanced Edit / other apps)
+    try {
+      const html = contentType === "markdown" ? renderMD(content) : content;
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([content], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        })
+      ]);
+      onToast("Copied with formatting", ic.check);
+    } catch (e) {
+      // Fallback for browsers without ClipboardItem support
+      navigator.clipboard.writeText(content);
+      onToast("Copied to clipboard", ic.check);
+    }
+  };
   const exportHTML = () => {
     const bodyHtml = contentType === "html-doc" ? content : (contentType === "html-snippet" ? content : renderMD(content));
     const wc = content.trim() ? content.trim().split(/\s+/).length : 0;
