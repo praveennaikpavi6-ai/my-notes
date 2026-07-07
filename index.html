@@ -1466,38 +1466,54 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
     }
   }, [advancedEdit]);
 
-  // Paste handler for Advanced Edit — preserves Word formatting, strips garbage
+  // Paste handler for Advanced Edit — preserves Word/website formatting, strips garbage
+  // Ctrl+Shift+V pastes as plain text (paste special)
   useEffect(() => {
     if (!advancedEdit || !advEditRef.current) return;
     const el = advEditRef.current;
+    let plainNext = false;
+    const onKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'v') plainNext = true;
+    };
     const handlePaste = (e) => {
       e.preventDefault();
       const html = e.clipboardData.getData('text/html');
       const text = e.clipboardData.getData('text/plain');
-      if (html) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const body = doc.body;
-        // Remove Word/browser noise elements
-        body.querySelectorAll('style,script,meta,link,xml').forEach(n => n.remove());
-        body.querySelectorAll('[class^="Mso"],[class*=" Mso"]').forEach(n => { n.removeAttribute('class'); });
-        body.querySelectorAll('*').forEach(node => {
-          const s = node.getAttribute('style') || '';
-          const keep = [];
-          const fw = s.match(/font-weight\s*:\s*([^;]+)/); if (fw) keep.push(`font-weight:${fw[1].trim()}`);
-          const fs = s.match(/font-size\s*:\s*([^;]+)/);   if (fs) keep.push(`font-size:${fs[1].trim()}`);
-          const col = s.match(/(?:^|;)\s*color\s*:\s*([^;]+)/); if (col && !/windowtext|black/i.test(col[1])) keep.push(`color:${col[1].trim()}`);
-          const td = s.match(/text-decoration\s*:\s*([^;]+)/); if (td) keep.push(`text-decoration:${td[1].trim()}`);
-          if (keep.length) node.setAttribute('style', keep.join(';')); else node.removeAttribute('style');
-          node.removeAttribute('lang'); node.removeAttribute('valign');
-        });
-        document.execCommand('insertHTML', false, body.innerHTML);
-      } else {
+      if (plainNext || !html) {
+        plainNext = false;
         document.execCommand('insertText', false, text);
+        return;
       }
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const body = doc.body;
+      // Remove Word/browser noise elements
+      body.querySelectorAll('style,script,meta,link,xml,iframe,object,embed').forEach(n => n.remove());
+      body.querySelectorAll('[class^="Mso"],[class*=" Mso"]').forEach(n => { n.removeAttribute('class'); });
+      body.querySelectorAll('*').forEach(node => {
+        const s = node.getAttribute('style') || '';
+        const keep = [];
+        const grab = (prop, test) => {
+          const m = s.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`));
+          if (m && (!test || test(m[1]))) keep.push(`${prop}:${m[1].trim()}`);
+        };
+        grab('font-weight');
+        grab('font-size');
+        grab('font-style');
+        grab('font-family');
+        grab('color', v => !/windowtext|black|rgb\(0,\s*0,\s*0\)/i.test(v));
+        grab('background-color', v => !/transparent|white|#fff|rgb\(255,\s*255,\s*255\)/i.test(v));
+        grab('text-decoration');
+        grab('text-align');
+        if (keep.length) node.setAttribute('style', keep.join(';')); else node.removeAttribute('style');
+        node.removeAttribute('lang'); node.removeAttribute('valign');
+        node.removeAttribute('class'); node.removeAttribute('id');
+      });
+      document.execCommand('insertHTML', false, body.innerHTML);
     };
     el.addEventListener('paste', handlePaste);
-    return () => el.removeEventListener('paste', handlePaste);
+    document.addEventListener('keydown', onKeyDown);
+    return () => { el.removeEventListener('paste', handlePaste); document.removeEventListener('keydown', onKeyDown); };
   }, [advancedEdit]);
 
   // Reset advanced edit when note changes
@@ -1546,12 +1562,17 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   const saveAdvancedEdit = () => {
     if (!advEditRef.current) return;
     let newContent;
-    if (contentType === 'markdown') {
+    // Styled content (colors, sizes, backgrounds from websites/Word) can't survive
+    // markdown conversion — keep those notes as HTML so formatting is preserved
+    const hasRichStyles = !!advEditRef.current.querySelector('[style*="color"],[style*="font-size"],[style*="background"],[style*="font-family"]');
+    if (contentType === 'markdown' && !hasRichStyles) {
       // Convert HTML back to markdown — note stays as markdown type, rendering unchanged
       newContent = htmlToMD(advEditRef.current.innerHTML);
     } else {
-      // For HTML notes, save HTML directly
+      // For HTML/styled notes, save HTML directly
       newContent = advEditRef.current.innerHTML;
+      // Ensure it's detected as html-snippet on reload (must start with a tag)
+      if (!/^\s*</.test(newContent) || !newContent.includes('</')) newContent = `<div>${newContent}</div>`;
     }
     setContent(newContent);
     sched(title, newContent, tags, pinned, archived, color);
@@ -1991,7 +2012,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
               <div style={{ position: "relative" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, padding:"7px 12px", background:"rgba(124,106,247,0.1)", border:"1px solid rgba(124,106,247,0.3)", borderRadius:8 }}>
                   <Icon d={ic.sparkle} size={13} stroke="var(--accent2)" />
-                  <span style={{ fontSize:12, color:"var(--accent2)", fontWeight:600 }}>Advanced Edit — use the toolbar above or click anywhere to type</span>
+                  <span style={{ fontSize:12, color:"var(--accent2)", fontWeight:600 }}>Advanced Edit — Ctrl+V pastes with formatting · Ctrl+Shift+V pastes plain text</span>
                   <span style={{ fontSize:11, color:"var(--t2)", marginLeft:"auto" }}>Save Changes in toolbar when done</span>
                 </div>
                 <div ref={advEditRef} contentEditable suppressContentEditableWarning
