@@ -1455,11 +1455,27 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   // ── Advanced Edit (contenteditable preview) ───────────────────────────────
   const [advancedEdit, setAdvancedEdit] = useState(false);
   const advEditRef = useRef(null);
+  const htmlDocRef = useRef(null); // iframe for html-doc notes
 
   useEffect(() => {
-    if (advancedEdit && advEditRef.current) {
-      const html = (contentType === "html-snippet" || contentType === "html-doc")
-        ? content : renderMD(content);
+    if (!advancedEdit) return;
+    if (contentType === "html-doc") {
+      // Full HTML documents are edited inside their own iframe (keeps their styles)
+      const enable = () => {
+        try {
+          const doc = htmlDocRef.current?.contentDocument;
+          if (doc) { doc.designMode = "on"; htmlDocRef.current.contentWindow.focus(); }
+        } catch(e) { console.warn("designMode failed:", e); }
+      };
+      enable();
+      const t = setTimeout(enable, 300); // in case iframe is still loading
+      return () => {
+        clearTimeout(t);
+        try { const d = htmlDocRef.current?.contentDocument; if (d) d.designMode = "off"; } catch(e) {}
+      };
+    }
+    if (advEditRef.current) {
+      const html = contentType === "html-snippet" ? content : renderMD(content);
       advEditRef.current.innerHTML = html;
       advEditRef.current.focus();
       try { document.execCommand('defaultParagraphSeparator', false, 'br'); } catch(e) {}
@@ -1560,6 +1576,19 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   };
 
   const saveAdvancedEdit = () => {
+    if (contentType === "html-doc") {
+      try {
+        const doc = htmlDocRef.current?.contentDocument;
+        if (!doc) return;
+        doc.designMode = "off";
+        const newHtml = "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+        setContent(newHtml);
+        sched(title, newHtml, tags, pinned, archived, color);
+        setAdvancedEdit(false);
+        onToast("Changes saved", ic.check);
+      } catch(e) { onToast("Could not save HTML document", ic.close); }
+      return;
+    }
     if (!advEditRef.current) return;
     let newContent;
     // Styled content (colors, sizes, backgrounds from websites/Word) can't survive
@@ -1583,8 +1612,8 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
   const renderPreview = () => {
     if (contentType === "html-doc") {
       return (
-        <iframe srcDoc={content} className="html-preview-frame"
-          style={{ width: "100%", minHeight: 600, border: "none", borderRadius: 8, background: "#fff" }}
+        <iframe ref={htmlDocRef} srcDoc={content} className="html-preview-frame"
+          style={{ width: "100%", minHeight: 600, border: advancedEdit ? "2px solid var(--accent)" : "none", borderRadius: 8, background: "#fff" }}
           sandbox="allow-scripts allow-same-origin" title="HTML Preview" />
       );
     }
@@ -1805,7 +1834,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
           <Icon d={ic.edit} size={13} /> {preview ? "Edit" : "Editing…"}
         </button>
         {/* Advanced Edit — only in preview mode */}
-        {preview && contentType !== "html-doc" && (
+        {preview && (
           <>
             <div className="tsep" />
             {advancedEdit ? (
@@ -1895,12 +1924,17 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
           {(!preview || advancedEdit) && (() => {
             // Helper: in advanced edit, use execCommand (keeps focus on contenteditable)
             const adv = advancedEdit;
-            const cmd = (e, command, val) => { e.preventDefault(); document.execCommand(command, false, val || null); };
-            const ins = (e, html) => { e.preventDefault(); document.execCommand('insertHTML', false, html); };
-            const getSel = () => { const s = window.getSelection(); return s && s.toString() ? s.toString() : null; };
+            // html-doc notes are edited inside their iframe — commands must target its document
+            const tgtDoc = () => (adv && contentType === "html-doc" && htmlDocRef.current?.contentDocument) || document;
+            const cmd = (e, command, val) => { e.preventDefault(); tgtDoc().execCommand(command, false, val || null); };
+            const ins = (e, html) => { e.preventDefault(); tgtDoc().execCommand('insertHTML', false, html); };
+            const getSel = () => {
+              const w = (adv && contentType === "html-doc" && htmlDocRef.current?.contentWindow) || window;
+              const s = w.getSelection(); return s && s.toString() ? s.toString() : null;
+            };
 
             const doColor = (e, hex) => {
-              if (adv) { e.preventDefault(); document.execCommand('foreColor', false, hex); setFmtColorOpen(false); }
+              if (adv) { e.preventDefault(); tgtDoc().execCommand('foreColor', false, hex); setFmtColorOpen(false); }
               else insertColor(hex);
             };
             const doTable = (e, w, cols, rows) => {
@@ -1975,7 +2009,7 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
                         <span style={{fontSize:11,color:"var(--t2)"}}>Custom:</span>
                         <input type="color" defaultValue="#ffffff"
                           style={{width:28,height:22,border:"none",background:"none",cursor:"pointer",padding:0}}
-                          onChange={e => adv ? document.execCommand('foreColor',false,e.target.value) : insertColor(e.target.value)} />
+                          onChange={e => adv ? tgtDoc().execCommand('foreColor',false,e.target.value) : insertColor(e.target.value)} />
                       </div>
                     </div>
                   )}
@@ -2056,12 +2090,18 @@ function NoteEditor({ note, noteId, tree, onUpdate, onDelete, onToast, mobileFoc
               <div style={{ position: "relative" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, padding:"7px 12px", background:"rgba(124,106,247,0.1)", border:"1px solid rgba(124,106,247,0.3)", borderRadius:8 }}>
                   <Icon d={ic.sparkle} size={13} stroke="var(--accent2)" />
-                  <span style={{ fontSize:12, color:"var(--accent2)", fontWeight:600 }}>Advanced Edit — Ctrl+V pastes with formatting · Ctrl+Shift+V pastes plain text</span>
+                  <span style={{ fontSize:12, color:"var(--accent2)", fontWeight:600 }}>
+                    {contentType === "html-doc"
+                      ? "Advanced Edit — click inside the document and type; its own design stays intact"
+                      : "Advanced Edit — Ctrl+V pastes with formatting · Ctrl+Shift+V pastes plain text"}
+                  </span>
                   <span style={{ fontSize:11, color:"var(--t2)", marginLeft:"auto" }}>Save Changes in toolbar when done</span>
                 </div>
-                <div ref={advEditRef} contentEditable suppressContentEditableWarning
-                  className="md-view"
-                  style={{ outline:"2px solid var(--accent)", outlineOffset:3, borderRadius:8, minHeight:300 }} />
+                {contentType === "html-doc" ? renderPreview() : (
+                  <div ref={advEditRef} contentEditable suppressContentEditableWarning
+                    className="md-view"
+                    style={{ outline:"2px solid var(--accent)", outlineOffset:3, borderRadius:8, minHeight:300 }} />
+                )}
               </div>
             ) : renderPreview()
           ) : (
